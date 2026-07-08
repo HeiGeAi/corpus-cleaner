@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""阶段7: 质量校对。检测空/过短、乱码残留、OCR字数偏低; 列出"删原始会丢内容"的文件。
+"""阶段7: 质量校对。检测空/过短、乱码残留、OCR字数偏低; 校验归档库与 manifest 一致
+(每条记录的 MD 是否在、类目目录里有没有孤儿 MD); 列出"删原始会丢内容"的文件。
 用法: python3 verify.py --out <库>"""
 import os, sys, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import load_manifest, garble_score, HAN_RE
+from common import load_manifest, garble_score, HAN_RE, safe_md, subcategory, SUBCATEGORY_FOR
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--out", required=True)
@@ -34,6 +35,38 @@ def main():
         if rows:
             print(f"\n=== {title} ===")
             for x in rows: print("  ", x)
+
+    # 归档库一致性: manifest 记录 <-> 类目目录里的 MD
+    cats = {r.get("category", "其他") for r in manifest}
+    built = any(os.path.isdir(os.path.join(a.out, c)) for c in cats)
+    if built:
+        expected = {}
+        for r in manifest:
+            if r.get("quality") not in ("text", "sparse"):
+                continue
+            cat = r.get("category", "其他")
+            sub = subcategory(r["name"]) if cat == SUBCATEGORY_FOR else None
+            parts = [cat, sub, safe_md(r)] if sub else [cat, safe_md(r)]
+            expected[os.path.join(*parts)] = r["name"]
+        missing_md = [v for k, v in expected.items() if not os.path.exists(os.path.join(a.out, k))]
+        orphan = []
+        for c in cats:
+            d = os.path.join(a.out, c)
+            for root, _, files in os.walk(d):
+                for f in files:
+                    rel = os.path.relpath(os.path.join(root, f), a.out)
+                    if f.endswith(".md") and rel not in expected:
+                        orphan.append(rel)
+        print(f"\n归档一致性: 缺 MD {len(missing_md)} | 孤儿 MD {len(orphan)}")
+        if missing_md:
+            print("  缺 MD(跑 build.py 重建):", missing_md[:10], "..." if len(missing_md) > 10 else "")
+        if orphan:
+            print("  孤儿 MD(不在 manifest,可能是旧版命名或手工文件):")
+            for o in orphan[:10]: print("   ", o)
+            if len(orphan) > 10: print(f"    ...共 {len(orphan)} 个")
+    else:
+        print("\n(库尚未 build,跳过归档一致性检查)")
+
     images = [r for r in manifest if r.get("quality") == "image"]
     failed = [r["name"] for r in manifest if r.get("quality") == "failed"]
     print(f"\n删原始会丢内容: 图片型 {len(images)} 个 + 损坏 {len(failed)} 个(内容未进库)")

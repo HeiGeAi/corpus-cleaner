@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""共享逻辑: 文本清洗、质量判定、分类规则、文件名安全化。
+"""共享逻辑: 文本清洗、质量判定、分类规则、manifest 增量合并、文件名安全化、摘要关键词。
 分类规则按内容领域调整 —— 默认是营销/文案素材的分类,换领域时改 CATEGORY_RULES 和 SUBCATEGORY_RULES 即可。"""
 import os, re, json
 
@@ -69,11 +69,26 @@ def subcategory(name):
             return label
     return DEFAULT_SUBCATEGORY
 
-# ---------- 文件名安全化(做 .md 文件名) ----------
-def safe_md(name):
-    return os.path.splitext(name)[0].replace("/", "／") + ".md"
+# ---------- 文件标识与命名 ----------
+def rec_key(rec):
+    """manifest 记录的唯一键。新记录用相对路径 rel,老记录(v0.1)只有 name,兼容两代。"""
+    return rec.get("rel") or rec.get("name")
 
-# ---------- manifest 读写 ----------
+def flat_name(rel):
+    """把相对路径压平成 _raw 下的安全文件名: 子目录/文件.pdf -> 子目录__文件.pdf"""
+    return rel.replace(os.sep, "__").replace("/", "__")
+
+def safe_md(rec):
+    """生成 .md 文件名。带扩展名后缀防止 a.pdf 和 a.pptx 相互覆盖;
+    老记录(无 rel 且历史库已按旧规则命名)保持旧名以免整库文件名漂移。"""
+    name = rec["name"] if isinstance(rec, dict) else rec
+    base, ext = os.path.splitext(name)
+    base = base.replace("/", "／")
+    if isinstance(rec, dict) and not rec.get("rel"):
+        return base + ".md"          # v0.1 老库兼容
+    return f"{base}.{ext.lstrip('.')}.md" if ext else base + ".md"
+
+# ---------- manifest 读写与增量合并 ----------
 def load_manifest(out_dir):
     p = os.path.join(out_dir, "manifest.json")
     return json.load(open(p, encoding="utf-8")) if os.path.exists(p) else []
@@ -81,6 +96,68 @@ def load_manifest(out_dir):
 def save_manifest(out_dir, manifest):
     json.dump(manifest, open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=1)
+
+def manifest_index(manifest):
+    """key -> 记录 的索引,用于增量合并。"""
+    return {rec_key(r): r for r in manifest}
+
+# 这些质量态代表"上次没成功/没处理",重跑 extract 时值得再试一次
+RETRYABLE = {"failed", "unsupported", "needs_conversion"}
+# 这些状态是后续阶段(OCR/转换/修复)辛苦挣来的,增量重跑绝不能覆盖
+def is_settled(rec, out_dir):
+    """记录是否已妥善处理过: 提取物在库里且质量态不属于可重试。"""
+    q = rec.get("quality")
+    if q in RETRYABLE or q is None:
+        return False
+    if q in ("text", "sparse"):
+        rp = rec.get("raw")
+        return bool(rp) and os.path.exists(os.path.join(out_dir, rp))
+    return True   # image / skip_duplicate 等判定型状态,无需重算
+
+# ---------- front matter 安全值 ----------
+_FM_UNSAFE = re.compile(r'[:#\[\]{}"\'\n|>&%@`*!,]')
+def fm_value(v):
+    """YAML front matter 值转义: 含特殊字符就用 JSON 字符串(合法 YAML 双引号形式)。"""
+    s = str(v)
+    if s == "" or _FM_UNSAFE.search(s) or s.strip() != s:
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+# ---------- 摘要与关键词(零 token,给粗筛层用) ----------
+_STOP_CH = set("的了是在和有不我你他她它们个这那与就都而及等或被把对从到于会能可要也很更最还只")
+_STOP_W2 = {"如何", "因为", "所以", "什么", "时候", "已经", "现在", "知道", "觉得", "没有",
+            "然后", "但是", "如果", "这样", "那样", "一一", "一个", "自己", "东西", "地方",
+            "开始", "起来", "出来", "进行", "通过", "以及", "其中", "其实", "当时", "今天"}
+_HAN2 = re.compile(r"[一-鿿]{2}")
+
+def auto_excerpt(text, limit=80):
+    """取正文开头第一段有信息量的文字做摘要片段。"""
+    for line in text.splitlines():
+        t = line.strip()
+        if len(re.sub(r"[\W\d_]", "", t)) >= 8:
+            t = re.sub(r"\s+", " ", t)
+            return t[:limit]
+    return ""
+
+def auto_keywords(text, top=6, min_freq=4):
+    """词频法抽中文二字词做粗筛关键词。糙,但零成本、够 grep 用。"""
+    from collections import Counter
+    cnt = Counter()
+    for i in range(len(text) - 1):
+        pair = text[i:i+2]
+        if (_HAN2.fullmatch(pair) and pair not in _STOP_W2
+                and pair[0] not in _STOP_CH and pair[1] not in _STOP_CH):
+            cnt[pair] += 1
+    picked, used = [], set()
+    for w, n in cnt.most_common(top * 4):
+        if n < min_freq:
+            break
+        if any(w[0] in p or w[1] in p for p in used):
+            continue
+        picked.append(w); used.add(w)
+        if len(picked) >= top:
+            break
+    return picked
 
 # ---------- 乱码检测(康熙部首区 + 相邻叠字) ----------
 RADICAL_RE = re.compile(r"[⺀-⻿⼀-⿟]")

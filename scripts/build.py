@@ -1,26 +1,35 @@
 # -*- coding: utf-8 -*-
-"""阶段6: 由 manifest + _raw 生成结构化归档库。
-清空类目目录重建(MD 都是衍生物),每文件一个标准化 MD(front matter + 正文),
-大类按关键词分子类,生成 INDEX.md 总索引 + 提取质量报告.md。
+"""阶段6: 由 manifest + _raw 生成结构化归档库,以及让库"能被用起来"的三件套:
+INDEX.md(总索引) + CATALOG.md(粗筛目录,每文件一行) + SOIL.md(给检索 agent 的使用协议)。
+清空类目目录重建(MD 都是衍生物,真身在 _raw),每文件一个标准化 MD(front matter + 正文),
+front matter 带 tags(词频关键词)和 excerpt(首段摘要),给两级检索当粗筛层。
 默认只为有真实内容的 text/sparse 生成 MD; 加 --keep-image 也为图片型生成占位 MD。
-用法: python3 build.py --out <库> [--keep-image]"""
+--index-extra <file>: 把手工维护的索引区块(如精细结构化目录)拼进 INDEX.md,重建不丢。
+用法: python3 build.py --out <库> [--keep-image] [--index-extra <md文件>]"""
 import os, sys, argparse, shutil
-from collections import Counter, defaultdict
+from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import (load_manifest, safe_md, classify, subcategory, SUBCATEGORY_FOR,
-                    SUBCATEGORY_RULES, DEFAULT_SUBCATEGORY)
+from common import (load_manifest, safe_md, subcategory, SUBCATEGORY_FOR,
+                    SUBCATEGORY_RULES, DEFAULT_SUBCATEGORY, fm_value,
+                    auto_excerpt, auto_keywords)
 
 QLABEL = {"text": "文字型", "sparse": "稀疏", "image": "图片型"}
+
+def wan(chars):
+    return f"{chars/10000:.1f}万字" if chars >= 10000 else f"{chars}字"
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--keep-image", action="store_true", help="也为图片型生成占位MD")
+    ap.add_argument("--index-extra", default=None, help="拼进INDEX的手工区块md文件")
     a = ap.parse_args()
     manifest = load_manifest(a.out)
+    if not manifest:
+        sys.exit(f"manifest.json 不存在或为空: {os.path.join(a.out, 'manifest.json')} —— 先跑 extract.py,或检查 --out 路径是否写对")
     cats = sorted({r.get("category", "其他") for r in manifest})
 
-    # 清空类目目录(不碰 _raw / manifest / 已有的精细结构化目录如非本流程生成的)
+    # 清空类目目录重建。只碰 manifest 里出现的类目,手工目录(精细结构化等)不动。
     for c in cats:
         d = os.path.join(a.out, c)
         if os.path.exists(d):
@@ -28,21 +37,29 @@ def main():
 
     qset = {"text", "sparse", "image"} if a.keep_image else {"text", "sparse"}
     written = 0
+    catalog_rows = []
     for r in manifest:
         q = r.get("quality")
         if q not in qset:
             continue
         cat = r.get("category", "其他")
-        tgt = os.path.join(a.out, cat, subcategory(r["name"])) if cat == SUBCATEGORY_FOR else os.path.join(a.out, cat)
+        sub = subcategory(r["name"]) if cat == SUBCATEGORY_FOR else None
+        tgt = os.path.join(a.out, cat, sub) if sub else os.path.join(a.out, cat)
         os.makedirs(tgt, exist_ok=True)
         body = ""
         if r.get("raw") and os.path.exists(os.path.join(a.out, r["raw"])):
             body = open(os.path.join(a.out, r["raw"]), encoding="utf-8").read().strip()
+        kws = auto_keywords(body) if body else []
+        exc = auto_excerpt(body) if body else ""
         is_ocr = r.get("ocr")
-        fm = ["---", f"title: {os.path.splitext(r['name'])[0]}", f"source: {r['name']}",
-              f"type: {r['ext'].lstrip('.')}", f"category: {cat}",
-              f"{r.get('unit','pages')}: {r.get('count','')}", f"chars: {r.get('chars','')}",
-              f"quality: {'文字型(OCR)' if is_ocr else QLABEL.get(q, q)}"]
+        title = os.path.splitext(r["name"])[0]
+        fm = ["---", f"title: {fm_value(title)}", f"source: {fm_value(r['name'])}",
+              f"type: {r['ext'].lstrip('.')}", f"category: {fm_value(cat)}"]
+        if sub: fm.append(f"subcategory: {fm_value(sub)}")
+        fm += [f"{r.get('unit','pages')}: {r.get('count','')}", f"chars: {r.get('chars','')}",
+               f"quality: {fm_value('文字型(OCR)' if is_ocr else QLABEL.get(q, q))}"]
+        if kws: fm.append("tags: [" + ", ".join(fm_value(k) for k in kws) + "]")
+        if exc: fm.append(f"excerpt: {fm_value(exc)}")
         if is_ocr: fm.append("ocr: true")
         if r.get("converted"): fm.append("converted: true (LibreOffice)")
         fm += ["---", ""]
@@ -51,8 +68,15 @@ def main():
         elif q == "image":
             fm.append(f"> 图片型,文本稀少({r.get('chars',0)}字),内容主要在图中,需视觉提炼。\n")
         fm.append(body)
-        open(os.path.join(tgt, safe_md(r["name"])), "w", encoding="utf-8").write("\n".join(fm))
+        md_name = safe_md(r)
+        open(os.path.join(tgt, md_name), "w", encoding="utf-8").write("\n".join(fm))
         written += 1
+        loc = f"{cat}/{sub}" if sub else cat
+        row_kw = " ".join(kws) if kws else "-"
+        row_exc = exc.replace("|", "/") if exc else "-"
+        catalog_rows.append((title.replace("|", "/"), loc, r.get("chars", 0),
+                             row_kw, row_exc, f"{loc}/{md_name}",
+                             "OCR" if is_ocr else QLABEL.get(q, q)))
 
     # 统计
     live = [r for r in manifest if r.get("quality") in qset]
@@ -61,11 +85,43 @@ def main():
     qc = Counter(r.get("quality") for r in manifest)
     ocr_n = sum(1 for r in live if r.get("ocr"))
 
+    # CATALOG.md —— 粗筛层,每文件一行,agent 先 grep 这里再深读
+    cat_lines = ["# CATALOG · 粗筛目录", "",
+                 "每文件一行: `标题 | 类目 | 字数 | 关键词 | 摘要 | 路径`。",
+                 "检索姿势: 先 grep 本文件锁定候选,再按路径深读正文。协议见 [SOIL.md](SOIL.md)。", ""]
+    for t, loc, ch, kw, exc, path, ql in sorted(catalog_rows, key=lambda x: (x[1], -x[2])):
+        cat_lines.append(f"- {t} | {loc} | {wan(ch)}{'·' + ql if ql != '文字型' else ''} | {kw} | {exc} | {path}")
+    open(os.path.join(a.out, "CATALOG.md"), "w", encoding="utf-8").write("\n".join(cat_lines))
+
+    # SOIL.md —— 给消费这个库的 agent 的使用协议
+    soil = ["# SOIL · 土壤库使用协议", "",
+            "这是一个清洗过的素材土壤库。本文件写给来检索的 agent,约定检索方式与引用纪律。", "",
+            "## 两级检索,先粗后深", "",
+            "1. **粗筛**: 先 grep [CATALOG.md](CATALOG.md)(每文件一行,含标题/关键词/摘要),",
+            "   或看 [INDEX.md](INDEX.md) 的类目分布。禁止一上来全库通读。",
+            "2. **深读**: 粗筛命中的文件按路径 Read 正文。单轮深读控制在 3-5 个文件,不够再扩。",
+            "3. **兜底**: 关键词冷门、粗筛无命中时,`grep -r \"关键词\"` 对应类目目录,再挑文件深读。",
+            "", "有 corpus-cleaner skill 在手时可用 `python3 scripts/query.py --lib <本库> <关键词>`,",
+            "标题/关键词命中加权排序,正文命中兜底,免手写多轮 grep。", "",
+            "## 诚实与溯源", "",
+            "- 检索不到就明说没有。库里不存在的内容,不能出现在引用里。",
+            "- 引用要可溯源: 产出中注明素材来自哪个文件(front matter 的 source 是原始文件名)。",
+            "- front matter 标 `ocr: true` 的文件经扫描识别,个别字可能有误,可参考,精确引用前先核对。",
+            "- 标注图片型的文件正文是占位,内容在原图里,不能当正文引用。", "",
+            "## 边界", "",
+            "- 本库提供事实、案例、句式、方法论;风格和判断由使用方自己负责,库不替你写。",
+            "- 类目分布: " + ", ".join(f"{c} {cc[c]}" for c in sorted(cc, key=lambda c: -cc[c])) + "。",
+            "", "<!-- 建库人可在此追加领域约定/禁用内容/账号隔离等,build 重跑会覆盖本文件,改完请存 --index-extra 同款手工区块 -->"]
+    open(os.path.join(a.out, "SOIL.md"), "w", encoding="utf-8").write("\n".join(soil))
+
     # INDEX
     idx = ["# 素材土壤库 · 总索引", "",
            "结构化 Markdown,靠 grep / read 检索。每文件一个标准化 MD(front matter + 正文)。", "",
-           f"共 {len(live)} 个可用文件。质量见 [提取质量报告.md](提取质量报告.md),元数据见 manifest.json。", "",
-           "## 类目", ""]
+           f"共 {len(live)} 个可用文件。用法协议见 [SOIL.md](SOIL.md),粗筛目录见 [CATALOG.md](CATALOG.md),",
+           f"质量见 [提取质量报告.md](提取质量报告.md),元数据见 manifest.json。", ""]
+    if a.index_extra and os.path.exists(a.index_extra):
+        idx += [open(a.index_extra, encoding="utf-8").read().strip(), ""]
+    idx += ["## 类目", ""]
     for cat in sorted(cc, key=lambda c: -cc[c]):
         idx.append(f"- [`{cat}/`]({cat}/) — {cc[cat]} 个")
         if cat == SUBCATEGORY_FOR:
@@ -73,8 +129,8 @@ def main():
                 if sub_cnt.get(s):
                     idx.append(f"  - `{s}/` ({sub_cnt[s]})")
     idx += ["", "## 检索约定",
+            "- 两级检索: 先 grep CATALOG.md 粗筛,命中再深读正文(详见 SOIL.md)",
             "- front matter 的 quality 字段标可用性;`ocr: true` 表示扫描识别(可能有个别字误)",
-            "- 按主题找参考 -> 对应类目目录,grep 关键词",
             f"- 共 {ocr_n} 本扫描书经 OCR 转正",
             "- _raw/ 留有全部提取文本备份"]
     open(os.path.join(a.out, "INDEX.md"), "w", encoding="utf-8").write("\n".join(idx))
@@ -91,11 +147,11 @@ def main():
         rows = [r for r in manifest if r.get("quality") == tag]
         if rows:
             rep += ["", f"## {title} ({len(rows)})", ""]
-            rep += [f"- [{r.get('chars','?')}字] [{r['category']}] {r['name']}" for r in
+            rep += [f"- [{r.get('chars','?')}字] [{r.get('category','?')}] {r['name']}" for r in
                     sorted(rows, key=lambda r: -r.get("chars", 0))]
     open(os.path.join(a.out, "提取质量报告.md"), "w", encoding="utf-8").write("\n".join(rep))
 
-    print(f"重建 {written} 个 MD")
+    print(f"重建 {written} 个 MD + INDEX.md + CATALOG.md + SOIL.md + 提取质量报告.md")
     print("类目:", dict(cc))
     if sub_cnt: print(f"{SUBCATEGORY_FOR} 子类:", dict(sub_cnt))
     print(f"OCR 转正 {ocr_n} 本")

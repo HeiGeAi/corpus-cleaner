@@ -6,7 +6,7 @@
 用法: python3 cleanup.py --src <素材包> --out <库> [--apply] [--delete-image]"""
 import os, sys, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import load_manifest, save_manifest
+from common import load_manifest, save_manifest, rec_key
 
 def main():
     ap = argparse.ArgumentParser()
@@ -17,7 +17,7 @@ def main():
     manifest = load_manifest(a.out)
     to_delete, keep, no_archive = [], [], []
     for r in manifest:
-        src = os.path.join(a.src, r["name"])
+        src = os.path.join(a.src, rec_key(r))
         if not os.path.exists(src):
             continue
         q = r.get("quality")
@@ -35,8 +35,8 @@ def main():
             keep.append(r)
 
     def gb(b): return f"{b/1024/1024/1024:.2f}GB" if b > 1e9 else f"{b/1024/1024:.0f}MB"
-    delsz = sum(os.path.getsize(os.path.join(a.src, r["name"])) for r in to_delete)
-    keepsz = sum(os.path.getsize(os.path.join(a.src, r["name"])) for r in keep if os.path.exists(os.path.join(a.src, r["name"])))
+    delsz = sum(os.path.getsize(os.path.join(a.src, rec_key(r))) for r in to_delete)
+    keepsz = sum(os.path.getsize(os.path.join(a.src, rec_key(r))) for r in keep if os.path.exists(os.path.join(a.src, rec_key(r))))
     print(f"{'[预览]' if not a.apply else '[执行]'} 将删 {len(to_delete)} 个 ({gb(delsz)}), 保留 {len(keep)} 个 ({gb(keepsz)})")
     if no_archive:
         print(f"⚠ 无留档保留不删: {len(no_archive)} 个 -> {no_archive}")
@@ -45,7 +45,7 @@ def main():
         return
     freed = 0
     for r in to_delete:
-        p = os.path.join(a.src, r["name"]); freed += os.path.getsize(p); os.remove(p)
+        p = os.path.join(a.src, rec_key(r)); freed += os.path.getsize(p); os.remove(p)
         r["original_deleted"] = True
     save_manifest(a.out, manifest)
     leftover = [f for f in os.listdir(a.src) if not f.startswith(".")] if os.path.exists(a.src) else []

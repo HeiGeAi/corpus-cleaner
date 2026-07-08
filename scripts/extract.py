@@ -1,11 +1,18 @@
 # -*- coding: utf-8 -*-
-"""阶段1+2: 扫描类型分布 + 分层提取文本到 _raw/all/, 写 manifest.json。
-用法: python3 extract.py --src <素材包目录> --out <输出库目录>
-零成本(无 LLM)。老格式 .ppt 标 needs_conversion 留给 convert_legacy.py。"""
-import os, sys, argparse, zipfile, subprocess, re, tempfile, shutil
-from collections import Counter, defaultdict
+"""阶段1+2: 扫描类型分布 + 分层提取文本到 _raw/all/, 增量合并进 manifest.json。
+用法: python3 extract.py --src <素材包目录> --out <输出库目录> [--force]
+零成本(无 LLM)。老格式 .ppt 标 needs_conversion 留给 convert_legacy.py。
+
+增量语义(重要):
+- 默认可安全重跑。已妥善处理的记录(含 OCR 转正/乱码修复/格式转换的成果)原样保留,
+  只提取新文件和上次 failed/unsupported 的文件。往素材包丢新文件后重跑本脚本即完成增量入库。
+- --force 对 src 里现存的所有文件强制重提(会重置这些文件的 OCR/修复状态,慎用)。
+- 递归扫描子目录,以相对路径为唯一键,同名不同目录/不同扩展名互不覆盖。"""
+import os, sys, argparse, zipfile, subprocess, re, tempfile, shutil, hashlib
+from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import clean, judge_quality, classify, load_manifest, save_manifest, find_soffice
+from common import (clean, judge_quality, classify, load_manifest, save_manifest,
+                    manifest_index, rec_key, is_settled, flat_name, find_soffice, RETRYABLE)
 
 def extract_pdf(p):
     import fitz
@@ -69,61 +76,100 @@ def extract_epub(p):
         raw = z.read(h).decode("utf-8", "ignore")
         raw = re.sub(r"(?is)<(script|style).*?</\1>", "", raw)
         raw = re.sub(r"(?s)<[^>]+>", " ", raw)
-        parts.append(re.sub(r"&[a-z]+;", " ", raw))
+        raw = re.sub(r"&#x?[0-9a-fA-F]+;", " ", raw)
+        parts.append(re.sub(r"&[a-zA-Z]+;", " ", raw))
     full = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]{2,}", " ", clean("\n".join(parts))))
     return full, {"unit": "chapters", "count": len(htmls), "chars": len(full.strip()), "quality": "text"}
 
 EXTRACTORS = {".pdf": extract_pdf, ".pptx": extract_pptx, ".docx": extract_docx,
               ".doc": extract_doc, ".epub": extract_epub}
 
+def walk_src(src, out):
+    """递归列出素材文件的相对路径。跳过隐藏文件/目录,跳过嵌在 src 里的输出库目录。"""
+    out_abs = os.path.abspath(out)
+    rels = []
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if not d.startswith(".")
+                   and os.path.abspath(os.path.join(root, d)) != out_abs]
+        for f in files:
+            if f.startswith("."):
+                continue
+            rels.append(os.path.relpath(os.path.join(root, f), src).replace(os.sep, "/"))
+    return sorted(rels)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True); ap.add_argument("--out", required=True)
+    ap.add_argument("--force", action="store_true",
+                    help="对 src 现存文件强制重提(会重置其 OCR/修复状态)")
     a = ap.parse_args()
     RAW = os.path.join(a.out, "_raw", "all"); os.makedirs(RAW, exist_ok=True)
 
-    files = sorted(f for f in os.listdir(a.src)
-                   if not f.startswith(".") and os.path.isfile(os.path.join(a.src, f)))
-    by_ext = Counter(os.path.splitext(f)[1].lower() for f in files)
+    rels = walk_src(a.src, a.out)
+    by_ext = Counter(os.path.splitext(r)[1].lower() for r in rels)
     print("=== 类型分布 ===")
     for ext, n in by_ext.most_common():
         print(f"  {ext or '(无)'}: {n}")
-    # epub/mobi 去重: 同名 epub 在则 mobi skip
-    epub_bases = {os.path.splitext(f)[0] for f in files if f.lower().endswith(".epub")}
 
-    manifest = []
-    done = 0
-    for fn in files:
-        ext = os.path.splitext(fn)[1].lower()
-        p = os.path.join(a.src, fn)
-        rec = {"name": fn, "ext": ext, "size": os.path.getsize(p), "category": classify(fn)}
+    manifest = load_manifest(a.out)
+    idx = manifest_index(manifest)
+    # epub/mobi 去重: 同路径同名 epub 在则 mobi skip
+    epub_bases = {os.path.splitext(r)[0] for r in rels if r.lower().endswith(".epub")}
+
+    claimed = {}          # raw 文件名 -> key, 防 flat_name 撞名
+    new = kept = retried = failed = 0
+    for i, rel in enumerate(rels, 1):
+        name = os.path.basename(rel)
+        ext = os.path.splitext(name)[1].lower()
+        p = os.path.join(a.src, rel)
+        old = idx.get(rel) or (idx.get(name) if name in idx else None)   # 兼容 v0.1 老键
+        if old is not None and not a.force and is_settled(old, a.out):
+            old.setdefault("rel", rel)
+            kept += 1
+            continue
+        if old is not None and old.get("quality") in RETRYABLE:
+            retried += 1
+
+        rec = old if old is not None else {}
+        rec.update({"name": name, "rel": rel, "ext": ext, "size": os.path.getsize(p)})
+        rec.setdefault("category", classify(name))
         try:
             if ext == ".ppt":
                 rec.update({"quality": "needs_conversion", "note": "老格式PPT,需LibreOffice转换"})
             elif ext == ".mobi":
-                if os.path.splitext(fn)[0] in epub_bases:
+                if os.path.splitext(rel)[0] in epub_bases:
                     rec.update({"quality": "skip_duplicate", "note": "与epub同书"})
                 else:
                     rec.update({"quality": "unsupported", "note": "mobi无epub版,未提取"})
             elif ext in EXTRACTORS:
                 full, meta = EXTRACTORS[ext](p)
-                rp = os.path.join(RAW, fn + ".txt")
+                fname = flat_name(rel) + ".txt"
+                if claimed.get(fname) not in (None, rel):
+                    fname = f"{hashlib.md5(rel.encode()).hexdigest()[:8]}__{fname}"
+                claimed[fname] = rel
+                rp = os.path.join(RAW, fname)
                 open(rp, "w", encoding="utf-8").write(full)
                 rec.update(meta); rec["raw"] = os.path.relpath(rp, a.out)
+                rec.pop("error", None); rec.pop("ocr", None); rec.pop("garble_fixed", None)
             else:
                 rec.update({"quality": "unsupported"})
         except Exception as e:
             rec.update({"quality": "failed", "error": f"{type(e).__name__}: {e}"})
-            print(f"[FAIL] {fn[:40]}: {e}")
-        manifest.append(rec)
-        done += 1
-        if done % 25 == 0:
-            print(f"  ...{done}/{len(files)}")
+            failed += 1
+            print(f"[FAIL] {rel[:48]}: {e}")
+        if old is None:
+            manifest.append(rec); idx[rel] = rec; new += 1
+        if i % 25 == 0:
+            print(f"  ...{i}/{len(rels)}")
+
     save_manifest(a.out, manifest)
     qc = Counter(r.get("quality") for r in manifest)
     print("\n=== 提取完成 ===")
-    print("质量分布:", dict(qc))
-    print("类目分布:", dict(Counter(r["category"] for r in manifest)))
+    print(f"本次: 新增 {new} | 保留已处理 {kept} | 重试 {retried} | 失败 {failed}")
+    print("全库质量分布:", dict(qc))
+    print("全库类目分布:", dict(Counter(r.get("category", "?") for r in manifest)))
+    if new or retried:
+        print("\n下一步: python3 scripts/build.py --out <库> 重建归档与索引")
 
 if __name__ == "__main__":
     main()

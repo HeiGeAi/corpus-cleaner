@@ -7,7 +7,8 @@
 依赖: brew install tesseract tesseract-lang"""
 import os, sys, argparse, subprocess, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import clean, load_manifest, save_manifest, rec_key, flat_name, require_tool
+from common import (clean, load_manifest, save_manifest, rec_key, raw_filename,
+                    safe_join, require_tool, secure_makedirs, secure_write_text)
 
 def ocr_page(doc, i, dpi, lang):
     pix = doc[i].get_pixmap(dpi=dpi)
@@ -18,25 +19,33 @@ def ocr_page(doc, i, dpi, lang):
     return clean(r.stdout.decode("utf-8", "ignore").strip())
 
 def main():
-    import fitz
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--threshold", type=int, default=150, help="采样均字数>=此值判为扫描书")
     ap.add_argument("--dpi", type=int, default=150)
     ap.add_argument("--lang", default="chi_sim+chi_tra")
     a = ap.parse_args()
+    try:
+        RAW = safe_join(a.out, os.path.join("_raw", "all"))
+    except ValueError as e:
+        sys.exit(f"拒绝不安全的输出路径: {e}")
+    secure_makedirs(a.out, os.path.join("_raw", "all"))
+    import fitz
     require_tool("tesseract",
                  "装: macOS `brew install tesseract tesseract-lang` / "
                  "Linux `apt install tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra` / "
                  "Windows 从 github.com/UB-Mannheim/tesseract/wiki 下载")
-    RAW = os.path.join(a.out, "_raw", "all"); os.makedirs(RAW, exist_ok=True)
     manifest = load_manifest(a.out)
     imgs = [r for r in manifest if r.get("quality") == "image" and r.get("ext") == ".pdf"
             and not r.get("ocr")]
+    try:
+        source_paths = {id(r): safe_join(a.src, rec_key(r)) for r in imgs}
+    except ValueError as e:
+        sys.exit(f"拒绝不安全的 manifest 路径: {e}")
     print(f"图片型 PDF {len(imgs)} 个, 采样判定扫描书...")
     books, missing = [], 0
     for r in imgs:
-        p = os.path.join(a.src, rec_key(r))
+        p = source_paths[id(r)]
         if not os.path.exists(p):
             missing += 1; continue
         try:
@@ -55,16 +64,16 @@ def main():
     done = 0
     for idx, r in enumerate(books, 1):
         try:
-            doc = fitz.open(os.path.join(a.src, rec_key(r))); n = doc.page_count
+            doc = fitz.open(source_paths[id(r)]); n = doc.page_count
             parts = [ocr_page(doc, i, a.dpi, a.lang) for i in range(n)]
             doc.close()
         except Exception as e:
             print(f"  [err] {r['name'][:40]}: {e}"); continue
         full = "\n\n".join(parts); chars = len(full.replace("\n", "").strip())
-        rp = os.path.join(RAW, flat_name(rec_key(r)) + ".txt")
-        open(rp, "w", encoding="utf-8").write(full)
+        raw_rel = os.path.join("_raw", "all", raw_filename(rec_key(r)))
+        secure_write_text(a.out, raw_rel, full, create_parent=True)
         r.update({"chars": chars, "quality": "text", "ocr": True, "count": n,
-                  "raw": os.path.relpath(rp, a.out)})
+                  "raw": raw_rel.replace(os.sep, "/")})
         save_manifest(a.out, manifest)   # 逐本落盘,断点续跑的关键
         done += 1
         print(f"  [{idx}/{len(books)}] {chars}字 {n}页  {r['name'][:44]}")

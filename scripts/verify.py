@@ -4,22 +4,34 @@
 用法: python3 verify.py --out <库>"""
 import os, sys, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import load_manifest, garble_score, HAN_RE, safe_md, subcategory, SUBCATEGORY_FOR
+from common import (load_manifest, garble_score, HAN_RE, safe_md, safe_join,
+                    subcategory, SUBCATEGORY_FOR, secure_exists, secure_is_dir,
+                    secure_read_text)
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--out", required=True)
     a = ap.parse_args()
     manifest = load_manifest(a.out)
+    try:
+        categories = {r.get("category", "其他") for r in manifest}
+        category_dirs = {c: safe_join(a.out, c) for c in categories}
+        raw_paths = {
+            id(r): safe_join(a.out, r["raw"])
+            for r in manifest
+            if r.get("raw")
+        }
+    except ValueError as e:
+        sys.exit(f"拒绝不安全的 manifest 路径: {e}")
     empty, garble, short_book, noraw = [], [], [], []
     ok = checked = 0
     for r in manifest:
         q = r.get("quality")
         if q not in ("text", "sparse"):
             continue
-        rp = r.get("raw"); full = os.path.join(a.out, rp) if rp else None
-        if not full or not os.path.exists(full):
+        rp = r.get("raw")
+        if not rp or not secure_exists(a.out, rp):
             noraw.append(r["name"]); continue
-        t = open(full, encoding="utf-8").read(); body = t.strip(); checked += 1
+        t = secure_read_text(a.out, rp); body = t.strip(); checked += 1
         if len(body) < 30:
             empty.append((r["name"], len(body))); continue
         if len(HAN_RE.findall(t)) >= 50:
@@ -37,8 +49,8 @@ def main():
             for x in rows: print("  ", x)
 
     # 归档库一致性: manifest 记录 <-> 类目目录里的 MD
-    cats = {r.get("category", "其他") for r in manifest}
-    built = any(os.path.isdir(os.path.join(a.out, c)) for c in cats)
+    cats = categories
+    built = any(secure_is_dir(a.out, c) for c in cats)
     if built:
         expected = {}
         for r in manifest:
@@ -47,11 +59,13 @@ def main():
             cat = r.get("category", "其他")
             sub = subcategory(r["name"]) if cat == SUBCATEGORY_FOR else None
             parts = [cat, sub, safe_md(r)] if sub else [cat, safe_md(r)]
-            expected[os.path.join(*parts)] = r["name"]
-        missing_md = [v for k, v in expected.items() if not os.path.exists(os.path.join(a.out, k))]
+            rel = os.path.join(*parts)
+            safe_join(a.out, rel)
+            expected[rel] = r["name"]
+        missing_md = [v for k, v in expected.items() if not secure_exists(a.out, k)]
         orphan = []
         for c in cats:
-            d = os.path.join(a.out, c)
+            d = category_dirs[c]
             for root, _, files in os.walk(d):
                 for f in files:
                     rel = os.path.relpath(os.path.join(root, f), a.out)

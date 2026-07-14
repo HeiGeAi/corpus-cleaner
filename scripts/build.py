@@ -6,12 +6,14 @@ front matter 带 tags(词频关键词)和 excerpt(首段摘要),给两级检索�
 默认只为有真实内容的 text/sparse 生成 MD; 加 --keep-image 也为图片型生成占位 MD。
 --index-extra <file>: 把手工维护的索引区块(如精细结构化目录)拼进 INDEX.md,重建不丢。
 用法: python3 build.py --out <库> [--keep-image] [--index-extra <md文件>]"""
-import os, sys, argparse, shutil
+import os, sys, argparse
 from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (load_manifest, safe_md, subcategory, SUBCATEGORY_FOR,
                     SUBCATEGORY_RULES, DEFAULT_SUBCATEGORY, fm_value,
-                    auto_excerpt, auto_keywords)
+                    auto_excerpt, auto_keywords, safe_join, secure_exists,
+                    secure_makedirs, secure_read_text, secure_rmtree,
+                    secure_write_text)
 
 QLABEL = {"text": "文字型", "sparse": "稀疏", "image": "图片型"}
 
@@ -28,12 +30,24 @@ def main():
     if not manifest:
         sys.exit(f"manifest.json 不存在或为空: {os.path.join(a.out, 'manifest.json')} —— 先跑 extract.py,或检查 --out 路径是否写对")
     cats = sorted({r.get("category", "其他") for r in manifest})
+    if any(c.replace("\\", "/").split("/", 1)[0].casefold() == "_raw" for c in cats):
+        sys.exit("拒绝把保留目录 _raw 用作类目，避免删除原始提取物")
+
+    # manifest 是可编辑文件，任何路径必须在删除旧归档前一次性预检。
+    # 否则恶意或误写的 `..`/绝对路径可让 rmtree 越过 --out。
+    try:
+        category_dirs = {c: safe_join(a.out, c) for c in cats}
+        raw_paths = {
+            id(r): safe_join(a.out, r["raw"])
+            for r in manifest
+            if r.get("raw")
+        }
+    except ValueError as e:
+        sys.exit(f"拒绝不安全的 manifest 路径: {e}")
 
     # 清空类目目录重建。只碰 manifest 里出现的类目,手工目录(精细结构化等)不动。
     for c in cats:
-        d = os.path.join(a.out, c)
-        if os.path.exists(d):
-            shutil.rmtree(d)
+        secure_rmtree(a.out, c, missing_ok=True)
 
     qset = {"text", "sparse", "image"} if a.keep_image else {"text", "sparse"}
     written = 0
@@ -44,11 +58,12 @@ def main():
             continue
         cat = r.get("category", "其他")
         sub = subcategory(r["name"]) if cat == SUBCATEGORY_FOR else None
-        tgt = os.path.join(a.out, cat, sub) if sub else os.path.join(a.out, cat)
-        os.makedirs(tgt, exist_ok=True)
+        target_rel = os.path.join(cat, sub) if sub else cat
+        secure_makedirs(a.out, target_rel)
         body = ""
-        if r.get("raw") and os.path.exists(os.path.join(a.out, r["raw"])):
-            body = open(os.path.join(a.out, r["raw"]), encoding="utf-8").read().strip()
+        raw_rel = r.get("raw")
+        if raw_rel and secure_exists(a.out, raw_rel):
+            body = secure_read_text(a.out, raw_rel).strip()
         kws = auto_keywords(body) if body else []
         exc = auto_excerpt(body) if body else ""
         is_ocr = r.get("ocr")
@@ -69,7 +84,7 @@ def main():
             fm.append(f"> 图片型,文本稀少({r.get('chars',0)}字),内容主要在图中,需视觉提炼。\n")
         fm.append(body)
         md_name = safe_md(r)
-        open(os.path.join(tgt, md_name), "w", encoding="utf-8").write("\n".join(fm))
+        secure_write_text(a.out, os.path.join(target_rel, md_name), "\n".join(fm))
         written += 1
         loc = f"{cat}/{sub}" if sub else cat
         row_kw = " ".join(kws) if kws else "-"
@@ -91,7 +106,7 @@ def main():
                  "检索姿势: 先 grep 本文件锁定候选,再按路径深读正文。协议见 [SOIL.md](SOIL.md)。", ""]
     for t, loc, ch, kw, exc, path, ql in sorted(catalog_rows, key=lambda x: (x[1], -x[2])):
         cat_lines.append(f"- {t} | {loc} | {wan(ch)}{'·' + ql if ql != '文字型' else ''} | {kw} | {exc} | {path}")
-    open(os.path.join(a.out, "CATALOG.md"), "w", encoding="utf-8").write("\n".join(cat_lines))
+    secure_write_text(a.out, "CATALOG.md", "\n".join(cat_lines))
 
     # SOIL.md —— 给消费这个库的 agent 的使用协议
     soil = ["# SOIL · 土壤库使用协议", "",
@@ -112,7 +127,7 @@ def main():
             "- 本库提供事实、案例、句式、方法论;风格和判断由使用方自己负责,库不替你写。",
             "- 类目分布: " + ", ".join(f"{c} {cc[c]}" for c in sorted(cc, key=lambda c: -cc[c])) + "。",
             "", "<!-- 建库人可在此追加领域约定/禁用内容/账号隔离等,build 重跑会覆盖本文件,改完请存 --index-extra 同款手工区块 -->"]
-    open(os.path.join(a.out, "SOIL.md"), "w", encoding="utf-8").write("\n".join(soil))
+    secure_write_text(a.out, "SOIL.md", "\n".join(soil))
 
     # INDEX
     idx = ["# 素材土壤库 · 总索引", "",
@@ -133,7 +148,7 @@ def main():
             "- front matter 的 quality 字段标可用性;`ocr: true` 表示扫描识别(可能有个别字误)",
             f"- 共 {ocr_n} 本扫描书经 OCR 转正",
             "- _raw/ 留有全部提取文本备份"]
-    open(os.path.join(a.out, "INDEX.md"), "w", encoding="utf-8").write("\n".join(idx))
+    secure_write_text(a.out, "INDEX.md", "\n".join(idx))
 
     # 质量报告
     rep = ["# 提取质量报告", "", f"全量 {len(manifest)} 个文件。", "", "## 质量分布", "",
@@ -149,7 +164,7 @@ def main():
             rep += ["", f"## {title} ({len(rows)})", ""]
             rep += [f"- [{r.get('chars','?')}字] [{r.get('category','?')}] {r['name']}" for r in
                     sorted(rows, key=lambda r: -r.get("chars", 0))]
-    open(os.path.join(a.out, "提取质量报告.md"), "w", encoding="utf-8").write("\n".join(rep))
+    secure_write_text(a.out, "提取质量报告.md", "\n".join(rep))
 
     print(f"重建 {written} 个 MD + INDEX.md + CATALOG.md + SOIL.md + 提取质量报告.md")
     print("类目:", dict(cc))

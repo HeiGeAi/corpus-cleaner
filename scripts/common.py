@@ -108,20 +108,17 @@ def raw_filename(rel):
 def safe_join(root, relative):
     """把 manifest 里的相对路径限制在指定根目录内。
 
-    使用 realpath 同时防 `..`、绝对路径和指向根目录外的符号链接。
+    与 openat 安全操作共用同一套组件解析，再用 realpath 防指向根目录外的符号链接。
     候选路径不允许等于根目录本身，避免删除型调用误操作整个根。
     """
     root_real = os.path.realpath(os.path.abspath(root))
-    rel = str(relative or "")
-    if (os.path.isabs(rel) or re.match(r"^[A-Za-z]:[\\/]", rel)
-            or rel.startswith("\\\\") or rel.startswith("//")):
-        raise ValueError(f"路径越界或指向根目录: {relative!r}")
-    candidate = os.path.realpath(os.path.join(root_real, rel))
+    parts = _relative_parts(relative)
+    candidate = os.path.realpath(os.path.join(root_real, *parts))
     try:
         contained = os.path.commonpath([root_real, candidate]) == root_real
     except ValueError:
         contained = False
-    if not rel or not contained or candidate == root_real:
+    if not contained or candidate == root_real:
         raise ValueError(f"路径越界或指向根目录: {relative!r}")
     return candidate
 

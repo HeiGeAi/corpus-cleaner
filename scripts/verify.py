@@ -11,6 +11,10 @@ from common import (load_manifest, garble_score, HAN_RE, safe_md, safe_join,
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--out", required=True)
     a = ap.parse_args()
+    # safe_join 会把根目录 realpath 化。macOS 的 /var -> /private/var 等别名下，
+    # os.walk 返回的也是真实路径；relpath 的基准必须同样规范化，否则刚 build
+    # 出来的正常文件会被计算成 ../../private/... 并全部误报为孤儿 MD。
+    out_root = os.path.realpath(os.path.abspath(a.out))
     manifest = load_manifest(a.out)
     try:
         categories = {r.get("category", "其他") for r in manifest}
@@ -68,7 +72,7 @@ def main():
             d = category_dirs[c]
             for root, _, files in os.walk(d):
                 for f in files:
-                    rel = os.path.relpath(os.path.join(root, f), a.out)
+                    rel = os.path.relpath(os.path.join(root, f), out_root)
                     if f.endswith(".md") and rel not in expected:
                         orphan.append(rel)
         print(f"\n归档一致性: 缺 MD {len(missing_md)} | 孤儿 MD {len(orphan)}")

@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 import zipfile
@@ -127,6 +128,12 @@ class ArchivePipelineTests(unittest.TestCase):
                 proc = subprocess.run(command, capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
+            self.assertIn(
+                "归档一致性: 缺 MD 0 | 孤儿 MD 0",
+                proc.stdout,
+                "verify 不应把刚由 build 生成的文件误报成孤儿 MD",
+            )
+
             # cleanup 只需要元数据与父目录写权限，不应要求源文件可读。
             source.chmod(0o200)
             cleanup_proc = subprocess.run(
@@ -208,6 +215,79 @@ class ArchivePipelineTests(unittest.TestCase):
             )
 
             self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_safe_join_uses_the_same_component_rules_as_secure_operations(self):
+        common = self._common_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(
+                common.safe_join(root, r"nested\category"),
+                os.path.realpath(root / "nested" / "category"),
+            )
+            ambiguous = [
+                r"z\..\outside",
+                "z//outside",
+                "z/./outside",
+                "z/../outside",
+                "/absolute/outside",
+                r"C:\outside",
+                r"\\server\share",
+                "//server/share",
+            ]
+            for relative in ambiguous:
+                with self.subTest(relative=relative):
+                    with self.assertRaises(ValueError):
+                        common.safe_join(root, relative)
+
+    def test_build_preflight_rejects_ambiguous_categories_before_any_deletion(self):
+        ambiguous_categories = [
+            r"z\..\outside",
+            "z//outside",
+            "z/./outside",
+        ]
+        for category in ambiguous_categories:
+            with self.subTest(category=category), tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "library"
+                raw = out / "_raw" / "all"
+                raw.mkdir(parents=True)
+                (raw / "safe.txt").write_text("安全内容" * 100, encoding="utf-8")
+                (raw / "bad.txt").write_text("异常内容" * 100, encoding="utf-8")
+                existing = out / "safe" / "must-survive.md"
+                existing.parent.mkdir()
+                existing.write_text("预检失败时不得删除", encoding="utf-8")
+                records = [
+                    {
+                        "name": "safe.docx",
+                        "rel": "safe.docx",
+                        "ext": ".docx",
+                        "quality": "text",
+                        "category": "safe",
+                        "raw": "_raw/all/safe.txt",
+                        "chars": 400,
+                    },
+                    {
+                        "name": "bad.docx",
+                        "rel": "bad.docx",
+                        "ext": ".docx",
+                        "quality": "text",
+                        "category": category,
+                        "raw": "_raw/all/bad.txt",
+                        "chars": 400,
+                    },
+                ]
+                (out / "manifest.json").write_text(
+                    json.dumps(records, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+                proc = subprocess.run(
+                    [sys.executable, str(BUILD), "--out", str(out)],
+                    capture_output=True,
+                    text=True,
+                )
+
+                self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertTrue(existing.is_file(), proc.stdout + proc.stderr)
 
     def test_build_rejects_case_variant_of_reserved_raw_category(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -490,6 +570,239 @@ class ArchivePipelineTests(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertIn("拒绝不安全", proc.stdout + proc.stderr)
             self.assertEqual(list(outside.rglob("*")), [])
+
+    def test_ocr_page_rejects_tesseract_failure_instead_of_returning_empty_text(self):
+        ocr_books = self._script_module("ocr_books")
+
+        class FakePixmap:
+            def save(self, path):
+                Path(path).write_bytes(b"fake png")
+
+        class FakeDocument:
+            def __getitem__(self, index):
+                page = type("FakePage", (), {})()
+                page.get_pixmap = lambda dpi: FakePixmap()
+                return page
+
+        failed = subprocess.CompletedProcess(
+            args=["tesseract"],
+            returncode=1,
+            stdout=b"",
+            stderr=b"Error opening data file chi_tra.traineddata",
+        )
+        with mock.patch.object(ocr_books.subprocess, "run", return_value=failed):
+            with self.assertRaisesRegex(RuntimeError, "tesseract OCR 失败"):
+                ocr_books.ocr_page(FakeDocument(), 0, 150, "chi_sim+chi_tra")
+
+    def test_ocr_main_closes_document_when_sampling_ocr_raises(self):
+        ocr_books = self._script_module("ocr_books")
+
+        class FakeDocument:
+            page_count = 1
+
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        document = FakeDocument()
+        fake_fitz = types.SimpleNamespace(open=mock.Mock(return_value=document))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            out = root / "out"
+            src.mkdir()
+            out.mkdir()
+            (src / "book.pdf").write_bytes(b"fake pdf")
+            manifest = [{
+                "name": "book.pdf",
+                "rel": "book.pdf",
+                "ext": ".pdf",
+                "quality": "image",
+            }]
+
+            with mock.patch.dict(sys.modules, {"fitz": fake_fitz}), \
+                    mock.patch.object(ocr_books, "require_tool"), \
+                    mock.patch.object(ocr_books, "load_manifest", return_value=manifest), \
+                    mock.patch.object(ocr_books, "ocr_page", side_effect=RuntimeError("OCR failed")), \
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        ["ocr_books.py", "--src", str(src), "--out", str(out)],
+                    ):
+                try:
+                    ocr_books.main()
+                except SystemExit:
+                    pass
+
+        self.assertTrue(document.closed, "OCR 异常时也必须关闭 fitz document")
+
+    def test_ocr_main_closes_document_when_full_ocr_raises(self):
+        ocr_books = self._script_module("ocr_books")
+
+        class FakeDocument:
+            page_count = 1
+
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        documents = [FakeDocument(), FakeDocument()]
+        fake_fitz = types.SimpleNamespace(open=mock.Mock(side_effect=documents))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            out = root / "out"
+            src.mkdir()
+            out.mkdir()
+            (src / "book.pdf").write_bytes(b"fake pdf")
+            manifest = [{
+                "name": "book.pdf",
+                "rel": "book.pdf",
+                "ext": ".pdf",
+                "quality": "image",
+            }]
+
+            with mock.patch.dict(sys.modules, {"fitz": fake_fitz}), \
+                    mock.patch.object(ocr_books, "require_tool"), \
+                    mock.patch.object(ocr_books, "load_manifest", return_value=manifest), \
+                    mock.patch.object(
+                        ocr_books,
+                        "ocr_page",
+                        side_effect=["字" * 200, RuntimeError("OCR failed")],
+                    ), \
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        ["ocr_books.py", "--src", str(src), "--out", str(out)],
+                    ):
+                try:
+                    ocr_books.main()
+                except SystemExit:
+                    pass
+
+        self.assertTrue(
+            all(document.closed for document in documents),
+            "全本 OCR 异常时也必须关闭 fitz document",
+        )
+
+    def test_ocr_main_exits_nonzero_when_all_sampling_fails(self):
+        ocr_books = self._script_module("ocr_books")
+
+        class FakeDocument:
+            page_count = 1
+
+            def close(self):
+                pass
+
+        fake_fitz = types.SimpleNamespace(open=mock.Mock(return_value=FakeDocument()))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            out = root / "out"
+            src.mkdir()
+            out.mkdir()
+            (src / "book.pdf").write_bytes(b"fake pdf")
+            manifest = [{
+                "name": "book.pdf",
+                "rel": "book.pdf",
+                "ext": ".pdf",
+                "quality": "image",
+            }]
+
+            with mock.patch.dict(sys.modules, {"fitz": fake_fitz}), \
+                    mock.patch.object(ocr_books, "require_tool"), \
+                    mock.patch.object(ocr_books, "load_manifest", return_value=manifest), \
+                    mock.patch.object(ocr_books, "ocr_page", side_effect=RuntimeError("OCR failed")), \
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        ["ocr_books.py", "--src", str(src), "--out", str(out)],
+                    ):
+                with self.assertRaises(SystemExit) as raised:
+                    ocr_books.main()
+
+        self.assertNotEqual(raised.exception.code, 0)
+
+    def test_ocr_main_preserves_partial_success_but_exits_nonzero_on_full_failure(self):
+        ocr_books = self._script_module("ocr_books")
+
+        class FakeDocument:
+            page_count = 1
+
+            def __init__(self, name, phase):
+                self.name = name
+                self.phase = phase
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        open_counts = {}
+        documents = []
+
+        def fake_open(path):
+            name = Path(path).name
+            count = open_counts.get(name, 0)
+            open_counts[name] = count + 1
+            document = FakeDocument(name, "sample" if count == 0 else "full")
+            documents.append(document)
+            return document
+
+        def fake_ocr_page(document, page, dpi, lang):
+            if document.name == "failed.pdf" and document.phase == "full":
+                raise RuntimeError("OCR failed")
+            return "有效文字" * 100
+
+        fake_fitz = types.SimpleNamespace(open=fake_open)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            out = root / "out"
+            src.mkdir()
+            out.mkdir()
+            records = []
+            for name in ("success.pdf", "failed.pdf"):
+                (src / name).write_bytes(b"fake pdf")
+                records.append({
+                    "name": name,
+                    "rel": name,
+                    "ext": ".pdf",
+                    "quality": "image",
+                })
+            (out / "manifest.json").write_text(
+                json.dumps(records, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(sys.modules, {"fitz": fake_fitz}), \
+                    mock.patch.object(ocr_books, "require_tool"), \
+                    mock.patch.object(ocr_books, "ocr_page", side_effect=fake_ocr_page), \
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        ["ocr_books.py", "--src", str(src), "--out", str(out)],
+                    ):
+                with self.assertRaises(SystemExit) as raised:
+                    ocr_books.main()
+
+            saved = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            by_name = {record["name"]: record for record in saved}
+            self.assertEqual(by_name["success.pdf"]["quality"], "text")
+            self.assertTrue(by_name["success.pdf"]["ocr"])
+            self.assertTrue((out / by_name["success.pdf"]["raw"]).is_file())
+            self.assertEqual(by_name["failed.pdf"]["quality"], "image")
+            self.assertNotIn("ocr", by_name["failed.pdf"])
+
+        self.assertNotEqual(raised.exception.code, 0)
+        self.assertTrue(all(document.closed for document in documents))
 
     @staticmethod
     def _common_module():

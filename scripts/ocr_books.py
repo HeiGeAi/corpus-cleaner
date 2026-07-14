@@ -13,9 +13,22 @@ from common import (clean, load_manifest, save_manifest, rec_key, raw_filename,
 def ocr_page(doc, i, dpi, lang):
     pix = doc[i].get_pixmap(dpi=dpi)
     tf = tempfile.NamedTemporaryFile(suffix=".png", delete=False); png = tf.name; tf.close()
-    pix.save(png)
-    r = subprocess.run(["tesseract", png, "stdout", "-l", lang, "--psm", "3"], capture_output=True)
-    os.remove(png)
+    try:
+        pix.save(png)
+        r = subprocess.run(
+            ["tesseract", png, "stdout", "-l", lang, "--psm", "3"],
+            capture_output=True,
+        )
+    finally:
+        try:
+            os.remove(png)
+        except FileNotFoundError:
+            pass
+    if r.returncode != 0:
+        detail = r.stderr.decode("utf-8", "ignore").strip() or "无错误详情"
+        raise RuntimeError(
+            f"tesseract OCR 失败(exit={r.returncode}, lang={lang}): {detail[:500]}"
+        )
     return clean(r.stdout.decode("utf-8", "ignore").strip())
 
 def main():
@@ -43,31 +56,39 @@ def main():
     except ValueError as e:
         sys.exit(f"拒绝不安全的 manifest 路径: {e}")
     print(f"图片型 PDF {len(imgs)} 个, 采样判定扫描书...")
-    books, missing = [], 0
+    books, missing, sampling_failed = [], 0, 0
     for r in imgs:
         p = source_paths[id(r)]
         if not os.path.exists(p):
             missing += 1; continue
         try:
-            doc = fitz.open(p); n = doc.page_count
-            sample = sorted(set([min(2, n-1), n//5, n//2, n*4//5]))
-            avg = sum(len(ocr_page(doc, i, a.dpi, "chi_sim")) for i in sample) / len(sample)
-            doc.close()
+            doc = fitz.open(p)
+            try:
+                n = doc.page_count
+                sample = sorted(set([min(2, n-1), n//5, n//2, n*4//5]))
+                avg = sum(len(ocr_page(doc, i, a.dpi, "chi_sim")) for i in sample) / len(sample)
+            finally:
+                doc.close()
             if avg >= a.threshold:
                 books.append(r)
                 print(f"  [书] {round(avg)}字/页 {n}页  {r['name'][:46]}")
         except Exception as e:
+            sampling_failed += 1
             print(f"  [err] {r['name'][:40]}: {e}")
     if missing:
         print(f"  (原始文件已不在 src 的跳过 {missing} 个)")
     print(f"\n判为扫描文字书: {len(books)} 个, 全本 OCR 中(每本完成即写盘,中断可续)...")
-    done = 0
+    done = full_failed = 0
     for idx, r in enumerate(books, 1):
         try:
-            doc = fitz.open(source_paths[id(r)]); n = doc.page_count
-            parts = [ocr_page(doc, i, a.dpi, a.lang) for i in range(n)]
-            doc.close()
+            doc = fitz.open(source_paths[id(r)])
+            try:
+                n = doc.page_count
+                parts = [ocr_page(doc, i, a.dpi, a.lang) for i in range(n)]
+            finally:
+                doc.close()
         except Exception as e:
+            full_failed += 1
             print(f"  [err] {r['name'][:40]}: {e}"); continue
         full = "\n\n".join(parts); chars = len(full.replace("\n", "").strip())
         raw_rel = os.path.join("_raw", "all", raw_filename(rec_key(r)))
@@ -78,6 +99,12 @@ def main():
         done += 1
         print(f"  [{idx}/{len(books)}] {chars}字 {n}页  {r['name'][:44]}")
     print(f"\nOCR 转正 {done} 本扫描书。下一步: build.py 重建库")
+    if sampling_failed or full_failed:
+        print(
+            f"OCR 批次失败: 采样 {sampling_failed} 本 | 全本 {full_failed} 本",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

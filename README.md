@@ -4,9 +4,9 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-v0.2.0-111827.svg)
+![Version](https://img.shields.io/badge/version-v0.2.1-111827.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB.svg?logo=python&logoColor=white)
-![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-0F766E.svg)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-0F766E.svg)
 ![License](https://img.shields.io/badge/license-MIT-059669.svg)
 
 [我为什么做这个](#我为什么做这个) · [库为什么会闲置](#库为什么会闲置) · [怎么分层](#怎么分层) · [检索层](#检索层三件套) · [实战](#实战) · [快速开始](#快速开始) · [English](#english)
@@ -110,10 +110,6 @@ brew install --cask libreoffice
 brew install tesseract tesseract-lang
 # Linux (Debian/Ubuntu)
 sudo apt install libreoffice tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra
-# Windows
-# LibreOffice: libreoffice.org
-# Tesseract:   github.com/UB-Mannheim/tesseract/wiki
-
 # 建库
 python3 scripts/extract.py        --src "你的素材包" --out "输出库"
 python3 scripts/fix_garble.py     --out "输出库"                # 看到乱码再跑
@@ -137,9 +133,11 @@ python3 scripts/query.py --lib "输出库" 关键词1 关键词2 --top 10
 |---|---|
 | macOS | 主测，推荐 |
 | Linux | 支持（装 LibreOffice 和 tesseract 即可，.doc 走 LibreOffice fallback） |
-| Windows | 实验性（路径自动检测已加，实战未充分测试） |
+| Windows | 暂不支持安全写删；检测到缺少 `dir_fd` / `O_NOFOLLOW` 时会明确拒绝执行 |
 
-可选依赖缺失时，对应阶段会给出安装提示，其他阶段继续工作。`extract` / `fix_garble` / `build` / `verify` / `cleanup` / `query` 只需要 Python 包，全平台可跑。
+涉及库内写入、重建和源文件删除的阶段使用 `openat` 风格目录句柄与 `O_NOFOLLOW`，防止路径检查后目录被符号链接替换。当前安全后端要求 macOS 或 Linux；不具备这些能力的平台会失败关闭，不会退回到有竞态的路径字符串写删。`query.py` 仍是只读脚本。
+
+可选依赖缺失时，对应阶段会给出安装提示，其他阶段继续工作。
 
 v0.1 建的老库直接跑新 `build.py` 即可升级出检索层，老文件名保持原样，外部引用不断。
 
@@ -239,6 +237,8 @@ python3 scripts/build.py   --out <library>
 ```
 
 Libraries built by v0.1 upgrade in place: just run the new `build.py` — old filenames stay stable.
+
+Filesystem mutations use directory file descriptors and `O_NOFOLLOW` to resist symlink-swap races. The secure backend currently requires macOS or Linux; unsupported platforms fail closed instead of falling back to racy path-based writes or deletes.
 
 ## Data policy
 

@@ -5,7 +5,9 @@
 若 LibreOffice 未装: brew install --cask libreoffice"""
 import os, sys, argparse, subprocess, tempfile, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import clean, judge_quality, load_manifest, save_manifest, rec_key, flat_name, find_soffice
+from common import (clean, judge_quality, load_manifest, save_manifest, rec_key,
+                    raw_filename, safe_join, find_soffice, secure_makedirs,
+                    secure_write_text)
 
 def extract_pptx(p):
     from pptx import Presentation
@@ -24,6 +26,11 @@ def main():
     ap.add_argument("--src", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--soffice", default=None, help="LibreOffice 路径,留空自动检测")
     a = ap.parse_args()
+    try:
+        RAW = safe_join(a.out, os.path.join("_raw", "all"))
+    except ValueError as e:
+        sys.exit(f"拒绝不安全的输出路径: {e}")
+    secure_makedirs(a.out, os.path.join("_raw", "all"))
     soff = a.soffice or find_soffice()
     assert soff and os.path.exists(soff), (
         "LibreOffice 未找到。\n"
@@ -31,17 +38,20 @@ def main():
         "  Linux: apt install libreoffice (或 dnf/pacman)\n"
         "  Windows: 从 libreoffice.org 下载安装"
     )
-    RAW = os.path.join(a.out, "_raw", "all"); os.makedirs(RAW, exist_ok=True)
     manifest = load_manifest(a.out)
     targets = [r for r in manifest if r.get("quality") == "needs_conversion"]
     if not targets:
         print("无待转换 .ppt"); return
     print(f"待转换 {len(targets)} 个, LibreOffice 逐个转换中(首次启动慢)...")
+    try:
+        source_paths = {id(r): safe_join(a.src, rec_key(r)) for r in targets}
+    except ValueError as e:
+        sys.exit(f"拒绝不安全的 manifest 路径: {e}")
     TMP = tempfile.mkdtemp(prefix="corpus_ppt_conv_")
     ok = 0
     try:
         for rec in targets:
-            s = os.path.join(a.src, rec_key(rec))
+            s = source_paths[id(rec)]
             if not os.path.exists(s):
                 print(f"[SKIP] 原始文件不在: {rec['name'][:40]}"); continue
             subprocess.run([soff, "--headless", "--convert-to", "pptx", "--outdir", TMP, s],
@@ -57,10 +67,10 @@ def main():
                 rec["quality"] = "failed"; rec["error"] = str(e)
                 os.remove(pptx); continue
             os.remove(pptx)   # 随转随清,防同名 base 互相污染
-            rp = os.path.join(RAW, flat_name(rec_key(rec)) + ".txt")
-            open(rp, "w", encoding="utf-8").write(full)
+            raw_rel = os.path.join("_raw", "all", raw_filename(rec_key(rec)))
+            secure_write_text(a.out, raw_rel, full, create_parent=True)
             rec.update({"unit": "slides", "count": n, "chars": chars, "quality": q,
-                        "raw": os.path.relpath(rp, a.out), "converted": True})
+                        "raw": raw_rel.replace(os.sep, "/"), "converted": True})
             rec.pop("error", None)
             ok += 1
             print(f"[OK] {q:6} {n}页 {chars}字  {rec['name'][:40]}")

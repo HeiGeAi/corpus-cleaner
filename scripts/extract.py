@@ -8,11 +8,12 @@
   只提取新文件和上次 failed/unsupported 的文件。往素材包丢新文件后重跑本脚本即完成增量入库。
 - --force 对 src 里现存的所有文件强制重提(会重置这些文件的 OCR/修复状态,慎用)。
 - 递归扫描子目录,以相对路径为唯一键,同名不同目录/不同扩展名互不覆盖。"""
-import os, sys, argparse, zipfile, subprocess, re, tempfile, shutil, hashlib
+import os, sys, argparse, zipfile, subprocess, re, tempfile, shutil
 from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (clean, judge_quality, classify, load_manifest, save_manifest,
-                    manifest_index, rec_key, is_settled, flat_name, find_soffice, RETRYABLE)
+                    manifest_index, rec_key, is_settled, raw_filename, safe_join,
+                    find_soffice, secure_makedirs, secure_write_text, RETRYABLE)
 
 def extract_pdf(p):
     import fitz
@@ -103,7 +104,11 @@ def main():
     ap.add_argument("--force", action="store_true",
                     help="对 src 现存文件强制重提(会重置其 OCR/修复状态)")
     a = ap.parse_args()
-    RAW = os.path.join(a.out, "_raw", "all"); os.makedirs(RAW, exist_ok=True)
+    try:
+        RAW = safe_join(a.out, os.path.join("_raw", "all"))
+    except ValueError as e:
+        sys.exit(f"拒绝不安全的输出路径: {e}")
+    secure_makedirs(a.out, os.path.join("_raw", "all"))
 
     rels = walk_src(a.src, a.out)
     by_ext = Counter(os.path.splitext(r)[1].lower() for r in rels)
@@ -116,18 +121,23 @@ def main():
     # epub/mobi 去重: 同路径同名 epub 在则 mobi skip
     epub_bases = {os.path.splitext(r)[0] for r in rels if r.lower().endswith(".epub")}
 
-    claimed = {}          # raw 文件名 -> key, 防 flat_name 撞名
+    raw_counts = Counter(r.get("raw") for r in manifest if r.get("raw"))
     new = kept = retried = failed = 0
     for i, rel in enumerate(rels, 1):
         name = os.path.basename(rel)
         ext = os.path.splitext(name)[1].lower()
         p = os.path.join(a.src, rel)
         old = idx.get(rel) or (idx.get(name) if name in idx else None)   # 兼容 v0.1 老键
-        if old is not None and not a.force and is_settled(old, a.out):
+        desired_raw = os.path.join("_raw", "all", raw_filename(rel))
+        refresh_raw = bool(old and old.get("raw") and (
+            raw_counts[old["raw"]] > 1
+            or os.path.normpath(old["raw"]) != os.path.normpath(desired_raw)
+        ))
+        if old is not None and not a.force and not refresh_raw and is_settled(old, a.out):
             old.setdefault("rel", rel)
             kept += 1
             continue
-        if old is not None and old.get("quality") in RETRYABLE:
+        if old is not None and (old.get("quality") in RETRYABLE or refresh_raw):
             retried += 1
 
         rec = old if old is not None else {}
@@ -136,6 +146,8 @@ def main():
         try:
             if ext == ".ppt":
                 rec.update({"quality": "needs_conversion", "note": "老格式PPT,需LibreOffice转换"})
+                if refresh_raw:
+                    rec.pop("raw", None); rec.pop("converted", None)
             elif ext == ".mobi":
                 if os.path.splitext(rel)[0] in epub_bases:
                     rec.update({"quality": "skip_duplicate", "note": "与epub同书"})
@@ -143,13 +155,9 @@ def main():
                     rec.update({"quality": "unsupported", "note": "mobi无epub版,未提取"})
             elif ext in EXTRACTORS:
                 full, meta = EXTRACTORS[ext](p)
-                fname = flat_name(rel) + ".txt"
-                if claimed.get(fname) not in (None, rel):
-                    fname = f"{hashlib.md5(rel.encode()).hexdigest()[:8]}__{fname}"
-                claimed[fname] = rel
-                rp = os.path.join(RAW, fname)
-                open(rp, "w", encoding="utf-8").write(full)
-                rec.update(meta); rec["raw"] = os.path.relpath(rp, a.out)
+                raw_rel = os.path.join("_raw", "all", raw_filename(rel))
+                secure_write_text(a.out, raw_rel, full, create_parent=True)
+                rec.update(meta); rec["raw"] = raw_rel.replace(os.sep, "/")
                 rec.pop("error", None); rec.pop("ocr", None); rec.pop("garble_fixed", None)
             else:
                 rec.update({"quality": "unsupported"})

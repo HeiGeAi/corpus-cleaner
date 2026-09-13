@@ -62,7 +62,7 @@ def extract_doc(p):
             subprocess.run([soff, "--headless", "--convert-to", "txt:Text", "--outdir", tmp, p],
                            capture_output=True, timeout=120)
             txt = os.path.join(tmp, os.path.splitext(os.path.basename(p))[0] + ".txt")
-            full = clean(open(txt, encoding="utf-8").read()) if os.path.exists(txt) else ""
+            full = clean(open(txt, encoding="utf-8", errors="replace").read()) if os.path.exists(txt) else ""
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     chars = len(full.strip())

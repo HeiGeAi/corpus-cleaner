@@ -1270,8 +1270,10 @@ class DependencyFloorTests(unittest.TestCase):
             for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         }
-        self.assertIn("pymupdf>=1.26.7", requirements)
-        self.assertIn("pillow>=12.3.0", requirements)
+        self.assertIn("pymupdf>=1.26.7,<2", requirements)
+        self.assertIn("python-pptx>=0.6.21,<1", requirements)
+        self.assertIn("python-docx>=0.8.11,<1", requirements)
+        # Pillow 已作为无引用冗余依赖移除(O2),不再断言
 
 
 if __name__ == "__main__":

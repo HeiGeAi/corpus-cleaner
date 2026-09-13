@@ -179,6 +179,8 @@ corpus-cleaner/
 
 MIT。fork 后自己改也行。
 
+依赖许可提示：本工具依赖 PyMuPDF（AGPL-3.0）。再分发或商业嵌入时 AGPL copyleft 会传导，相关场景请自行评估或改用宽松授权的 PDF 库（如 pypdf，BSD）。
+
 ---
 
 <a id="english"></a>
@@ -247,6 +249,8 @@ The repo contains only code, rules, and docs. **No corpora or extraction outputs
 ## License
 
 MIT.
+
+Dependency license note: this tool depends on PyMuPDF (AGPL-3.0). Redistribution or commercial embedding triggers AGPL copyleft; evaluate your scenario or swap in a permissively licensed PDF library such as pypdf (BSD).
 
 ## 更多开源工具
 

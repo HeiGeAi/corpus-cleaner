@@ -8,7 +8,7 @@
   只提取新文件和上次 failed/unsupported 的文件。往素材包丢新文件后重跑本脚本即完成增量入库。
 - --force 对 src 里现存的所有文件强制重提(会重置这些文件的 OCR/修复状态,慎用)。
 - 递归扫描子目录,以相对路径为唯一键,同名不同目录/不同扩展名互不覆盖。"""
-import os, sys, argparse, zipfile, subprocess, re, tempfile, shutil
+import os, sys, argparse, zipfile, subprocess, re, tempfile, shutil, html
 from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (clean, judge_quality, classify, load_manifest, save_manifest,
@@ -76,9 +76,9 @@ def extract_epub(p):
     for h in htmls:
         raw = z.read(h).decode("utf-8", "ignore")
         raw = re.sub(r"(?is)<(script|style).*?</\1>", "", raw)
+        raw = html.unescape(raw)  # 先解码全部 HTML 实体(含 &#x4E2D; 数字字符引用),再剥标签
         raw = re.sub(r"(?s)<[^>]+>", " ", raw)
-        raw = re.sub(r"&#x?[0-9a-fA-F]+;", " ", raw)
-        parts.append(re.sub(r"&[a-zA-Z]+;", " ", raw))
+        parts.append(raw)
     full = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]{2,}", " ", clean("\n".join(parts))))
     return full, {"unit": "chapters", "count": len(htmls), "chars": len(full.strip()), "quality": "text"}
 

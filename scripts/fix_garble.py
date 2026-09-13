@@ -61,7 +61,7 @@ def main():
         t2 = dedup_repeats(norm_radicals(t))
         rad1, dup1 = garble_score(t2)
         secure_write_text(a.out, raw_rel, t2)
-        r["chars"] = len(HAN_RE.findall(t2)); r["garble_fixed"] = True
+        r["chars"] = len(t2.strip()); r["garble_fixed"] = True  # 与 extract 阶段同口径(全字符数)
         fixed += 1
         print(f"  部{rad0*100:4.1f}%叠{dup0*100:4.1f}% -> 部{rad1*100:4.1f}%叠{dup1*100:4.1f}%  {r['name'][:40]}")
     save_manifest(a.out, manifest)

@@ -141,9 +141,10 @@ def main():
             retried += 1
 
         rec = old if old is not None else {}
-        rec.update({"name": name, "rel": rel, "ext": ext, "size": os.path.getsize(p)})
+        rec.update({"name": name, "rel": rel, "ext": ext})
         rec.setdefault("category", classify(name))
         try:
+            rec["size"] = os.path.getsize(p)
             if ext == ".ppt":
                 rec.update({"quality": "needs_conversion", "note": "老格式PPT,需LibreOffice转换"})
                 if refresh_raw:

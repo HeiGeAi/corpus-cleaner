@@ -71,18 +71,20 @@ def main():
         print("\n这是预览。确认无误后加 --apply 真删。图片型默认保留,加 --delete-image 才删。")
         return
     freed = 0
-    for r in to_delete:
-        archive_rel = archive_rels.get(id(r))
-        if r.get("quality") in ("text", "sparse"):
-            if not archive_rel or secure_file_size(out_root, archive_rel) <= 10:
-                raise RuntimeError(f"删除前复核发现留档缺失或过短: {r['name']}")
-        freed += secure_unlink(
-            src_root,
-            source_rels[id(r)],
-            expected=source_stats[id(r)],
-        )
-        r["original_deleted"] = True
-        save_manifest(out_root, manifest)
+    try:
+        for r in to_delete:
+            archive_rel = archive_rels.get(id(r))
+            if r.get("quality") in ("text", "sparse"):
+                if not archive_rel or secure_file_size(out_root, archive_rel) <= 10:
+                    raise RuntimeError(f"删除前复核发现留档缺失或过短: {r['name']}")
+            freed += secure_unlink(
+                src_root,
+                source_rels[id(r)],
+                expected=source_stats[id(r)],
+            )
+            r["original_deleted"] = True
+    finally:
+        save_manifest(out_root, manifest)   # 统一落盘,finally 保证中断时状态不丢
     try:
         leftover = [f for f in secure_listdir(src_root) if not f.startswith(".")]
     except FileNotFoundError:

@@ -66,7 +66,7 @@ def main():
             try:
                 n = doc.page_count
                 sample = sorted(set([min(2, n-1), n//5, n//2, n*4//5]))
-                avg = sum(len(ocr_page(doc, i, a.dpi, "chi_sim")) for i in sample) / len(sample)
+                avg = sum(len(ocr_page(doc, i, a.dpi, a.lang)) for i in sample) / len(sample)
             finally:
                 doc.close()
             if avg >= a.threshold:

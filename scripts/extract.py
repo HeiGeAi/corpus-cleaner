@@ -69,11 +69,15 @@ def extract_doc(p):
     return full, {"unit": "doc", "count": 1, "chars": chars,
                   "quality": "text" if chars >= 200 else "sparse"}
 
+EPUB_CHAPTER_CAP = 50 * 1024 * 1024   # 单章节解压后上限 50MB,防 zip bomb 耗尽内存
+
 def extract_epub(p):
     z = zipfile.ZipFile(p)
     htmls = sorted(n for n in z.namelist() if n.lower().endswith((".html", ".xhtml", ".htm")))
     parts = []
     for h in htmls:
+        if z.getinfo(h).file_size > EPUB_CHAPTER_CAP:
+            raise ValueError(f"epub 章节解压后超 50MB,疑似 zip bomb: {h}")
         raw = z.read(h).decode("utf-8", "ignore")
         raw = re.sub(r"(?is)<(script|style).*?</\1>", "", raw)
         raw = html.unescape(raw)  # 先解码全部 HTML 实体(含 &#x4E2D; 数字字符引用),再剥标签

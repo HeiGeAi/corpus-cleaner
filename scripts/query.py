@@ -10,7 +10,8 @@ SKIP_TOP = {"INDEX.md", "CATALOG.md", "SOIL.md", "提取质量报告.md"}
 
 def parse_md(path):
     """返回 (front_matter_dict, body)。front matter 解析只取本库生成的简单 key: value。"""
-    text = open(path, encoding="utf-8", errors="ignore").read()
+    with open(path, encoding="utf-8", errors="ignore") as fp:
+        text = fp.read()
     fm = {}
     body = text
     if text.startswith("---"):

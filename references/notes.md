@@ -37,7 +37,7 @@
 ## 增量与兼容(v0.2 重构)
 - v0.1 的 extract 重跑会从零重建 manifest,直接抹掉 OCR/转换/修复状态——这是当年"跑一次就不敢再碰"的根因。v0.2 以相对路径 rel 为唯一键增量合并,`is_settled` 的记录(提取物在库、质量态非 failed/unsupported/needs_conversion)默认不动,增量入库=丢新文件+重跑 extract。
 - 老库(v0.1 manifest)没有 rel 字段:rec_key 回退用 name;safe_md 对无 rel 的老记录保持旧文件名(不带扩展名后缀),避免升级老库时 431 个文件名整体漂移、外部引用全断。新记录文件名带扩展名后缀(a.pdf.md / a.pptx.md),同名不同格式不再互相覆盖。
-- _raw 文件名把相对路径压平(子目录__文件.pdf.txt),压平撞名时加 8 位 md5 前缀。
+- _raw 文件名把相对路径压平(子目录__文件.pdf.txt),压平撞名时追加 10 位 sha256 后缀(bounded_filename 兜底场景取 12 位)。
 - OCR 逐本落盘 manifest:28 本书全本 OCR 是小时级任务,v0.1 中断全丢重来。v0.2 每本完成即 save_manifest,重跑自动跳过 ocr:true 的记录。
 
 ## 检索层设计依据(v0.2)

@@ -127,7 +127,16 @@ def main():
         name = os.path.basename(rel)
         ext = os.path.splitext(name)[1].lower()
         p = os.path.join(a.src, rel)
-        old = idx.get(rel) or (idx.get(name) if name in idx else None)   # 兼容 v0.1 老键
+        old = idx.get(rel)
+        if old is None and name in idx:
+            # 兼容 v0.1 老键: 同名记录须 ext+size 一致才绑定,防同名不同文件错绑状态
+            cand = idx[name]
+            try:
+                same_file = cand.get("ext") == ext and cand.get("size") == os.path.getsize(p)
+            except OSError:
+                same_file = False
+            if same_file:
+                old = cand
         desired_raw = os.path.join("_raw", "all", raw_filename(rel))
         refresh_raw = bool(old and old.get("raw") and (
             raw_counts[old["raw"]] > 1

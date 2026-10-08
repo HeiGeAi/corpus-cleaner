@@ -13,7 +13,7 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (clean, judge_quality, classify, load_manifest, save_manifest,
                     manifest_index, rec_key, is_settled, raw_filename, safe_join,
-                    find_soffice, secure_makedirs, secure_write_text, RETRYABLE)
+                    find_soffice, secure_makedirs, secure_write_text, secure_sha256, RETRYABLE)
 
 def extract_pdf(p):
     import fitz
@@ -51,7 +51,7 @@ def extract_doc(p):
     """处理 .doc 老格式 Word。macOS 用 textutil(快),其他平台 fallback 到 LibreOffice。"""
     if sys.platform == "darwin" and shutil.which("textutil"):
         r = subprocess.run(["textutil", "-convert", "txt", "-stdout", p],
-                           capture_output=True, timeout=60)
+                           capture_output=True, timeout=60, check=True)
         full = clean(r.stdout.decode("utf-8", "ignore"))
     else:
         soff = find_soffice()
@@ -60,9 +60,12 @@ def extract_doc(p):
         tmp = tempfile.mkdtemp()
         try:
             subprocess.run([soff, "--headless", "--convert-to", "txt:Text", "--outdir", tmp, p],
-                           capture_output=True, timeout=120)
+                           capture_output=True, timeout=120, check=True)
             txt = os.path.join(tmp, os.path.splitext(os.path.basename(p))[0] + ".txt")
-            full = clean(open(txt, encoding="utf-8", errors="replace").read()) if os.path.exists(txt) else ""
+            if not os.path.isfile(txt):
+                raise RuntimeError("LibreOffice 未生成文本输出")
+            with open(txt, encoding="utf-8", errors="replace") as converted:
+                full = clean(converted.read())
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     chars = len(full.strip())
@@ -80,8 +83,8 @@ def extract_epub(p):
             raise ValueError(f"epub 章节解压后超 50MB,疑似 zip bomb: {h}")
         raw = z.read(h).decode("utf-8", "ignore")
         raw = re.sub(r"(?is)<(script|style).*?</\1>", "", raw)
-        raw = html.unescape(raw)  # 先解码全部 HTML 实体(含 &#x4E2D; 数字字符引用),再剥标签
         raw = re.sub(r"(?s)<[^>]+>", " ", raw)
+        raw = html.unescape(raw)  # 只在移除实际标签后解码，保留文本中的尖括号
         parts.append(raw)
     full = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]{2,}", " ", clean("\n".join(parts))))
     return full, {"unit": "chapters", "count": len(htmls), "chars": len(full.strip()), "quality": "text"}
@@ -123,7 +126,7 @@ def main():
     manifest = load_manifest(a.out)
     idx = manifest_index(manifest)
     # epub/mobi 去重: 同路径同名 epub 在则 mobi skip
-    epub_bases = {os.path.splitext(r)[0] for r in rels if r.lower().endswith(".epub")}
+    epub_bases = {os.path.splitext(r)[0]: r for r in rels if r.lower().endswith(".epub")}
 
     raw_counts = Counter(r.get("raw") for r in manifest if r.get("raw"))
     new = kept = retried = failed = 0
@@ -146,7 +149,14 @@ def main():
             raw_counts[old["raw"]] > 1
             or os.path.normpath(old["raw"]) != os.path.normpath(desired_raw)
         ))
-        if old is not None and not a.force and not refresh_raw and is_settled(old, a.out):
+        source_changed = False
+        if old and old.get("source_sha256"):
+            try:
+                source_changed = secure_sha256(a.src, rel) != old["source_sha256"]
+            except (OSError, ValueError, RuntimeError):
+                source_changed = True
+        if (old is not None and not a.force and not refresh_raw and not source_changed
+                and old.get("quality") != "skip_duplicate" and is_settled(old, a.out)):
             old.setdefault("rel", rel)
             kept += 1
             continue
@@ -158,20 +168,27 @@ def main():
         rec.setdefault("category", classify(name))
         try:
             rec["size"] = os.path.getsize(p)
+            rec.pop("source_sha256", None)
+            fingerprint = secure_sha256(a.src, rel)
             if ext == ".ppt":
                 rec.update({"quality": "needs_conversion", "note": "老格式PPT,需LibreOffice转换"})
                 if refresh_raw:
                     rec.pop("raw", None); rec.pop("converted", None)
             elif ext == ".mobi":
                 if os.path.splitext(rel)[0] in epub_bases:
-                    rec.update({"quality": "skip_duplicate", "note": "与epub同书"})
+                    rec.update({"quality": "skip_duplicate", "note": "与epub同书",
+                                "duplicate_of": epub_bases[os.path.splitext(rel)[0]],
+                                "source_sha256": fingerprint})
                 else:
                     rec.update({"quality": "unsupported", "note": "mobi无epub版,未提取"})
             elif ext in EXTRACTORS:
                 full, meta = EXTRACTORS[ext](p)
+                if secure_sha256(a.src, rel) != fingerprint:
+                    raise RuntimeError("提取期间源文件已改变，请重试")
                 raw_rel = os.path.join("_raw", "all", raw_filename(rel))
                 secure_write_text(a.out, raw_rel, full, create_parent=True)
                 rec.update(meta); rec["raw"] = raw_rel.replace(os.sep, "/")
+                rec["source_sha256"] = fingerprint
                 rec.pop("error", None); rec.pop("ocr", None); rec.pop("garble_fixed", None)
             else:
                 rec.update({"quality": "unsupported"})

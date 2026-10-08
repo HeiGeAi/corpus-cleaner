@@ -2,14 +2,15 @@
 """阶段8: 安全删除原始素材。默认 dry-run(只列不删), 加 --apply 才真删。
 默认只删"已完整进库"的(text/sparse, 且 _raw 留档存在)+ skip_duplicate。
 图片型/损坏(内容没进库)默认保留; 加 --delete-image 才一并删(确认不要视觉内容时)。
-删前逐个验证 _raw 留档存在且非空, 无留档一律保留。
+删前逐个验证源文件 SHA-256 与提取时一致、_raw 留档存在且非空。
+同名重复文件必须关联到已验证的 EPUB；无指纹/不可读/留档无效时保留。
 用法: python3 cleanup.py --src <素材包> --out <库> [--apply] [--delete-image]"""
 import os, sys, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (load_manifest, save_manifest, rec_key, safe_join,
                     pin_root,
                     secure_file_size, secure_file_stat, secure_listdir,
-                    secure_unlink)
+                    secure_unlink, secure_sha256)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -36,6 +37,22 @@ def main():
     except ValueError as e:
         sys.exit(f"拒绝不安全的 manifest 路径: {e}")
 
+    index = {rec_key(r): r for r in manifest}
+
+    def verified_archive(r):
+        target = index.get(r.get("duplicate_of")) if r.get("quality") == "skip_duplicate" else r
+        if not target or target.get("quality") not in ("text", "sparse"):
+            return False
+        try:
+            for source in ([r] if target is r else [r, target]):
+                if (not source.get("source_sha256")
+                        or secure_sha256(src_root, rec_key(source)) != source["source_sha256"]):
+                    return False
+            raw = target.get("raw")
+            return bool(raw) and secure_file_size(out_root, raw) > 10
+        except (OSError, ValueError, RuntimeError):
+            return False
+
     to_delete, keep, no_archive = [], [], []
     source_stats = {}
     for r in manifest:
@@ -44,18 +61,11 @@ def main():
         except FileNotFoundError:
             continue
         q = r.get("quality")
-        if q in ("text", "sparse"):
-            archive_rel = archive_rels.get(id(r))
-            try:
-                archive_size = secure_file_size(out_root, archive_rel) if archive_rel else -1
-            except FileNotFoundError:
-                archive_size = -1
-            if archive_size > 10:
+        if q in ("text", "sparse", "skip_duplicate"):
+            if verified_archive(r):
                 to_delete.append(r)
             else:
-                no_archive.append(r["name"])  # 没留档 -> 不删
-        elif q == "skip_duplicate":
-            to_delete.append(r)
+                no_archive.append(r["name"])
         elif q in ("image", "failed"):
             (to_delete if a.delete_image else keep).append(r)
         else:
@@ -72,11 +82,11 @@ def main():
         return
     freed = 0
     try:
-        for r in to_delete:
-            archive_rel = archive_rels.get(id(r))
-            if r.get("quality") in ("text", "sparse"):
-                if not archive_rel or secure_file_size(out_root, archive_rel) <= 10:
-                    raise RuntimeError(f"删除前复核发现留档缺失或过短: {r['name']}")
+        # Verify duplicates while their archived source is still present.
+        for r in sorted(to_delete, key=lambda r: r.get("quality") != "skip_duplicate"):
+            if r.get("quality") in ("text", "sparse", "skip_duplicate"):
+                if not verified_archive(r):
+                    raise RuntimeError(f"删除前复核发现源文件改变或留档未验证: {r['name']}")
             freed += secure_unlink(
                 src_root,
                 source_rels[id(r)],

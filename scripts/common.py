@@ -463,6 +463,33 @@ def secure_read_text(root, relative, encoding="utf-8", errors="strict"):
         os.close(parent_fd)
 
 
+def secure_sha256(root, relative):
+    """Hash a stable regular file without following symlinks."""
+    parent_fd, name, parent_rel = _open_parent_fd(root, relative, create=False)
+    fd = None
+    try:
+        _assert_parent_stable(root, parent_rel, parent_fd)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"目标不是普通文件: {relative!r}")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        if (not _same_snapshot(before, os.fstat(fd))
+                or not _same_snapshot(before, _lstat_at(parent_fd, name))):
+            raise RuntimeError("文件在计算指纹期间被替换或修改")
+        _assert_parent_stable(root, parent_rel, parent_fd)
+        return digest.hexdigest()
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent_fd)
+
+
 def secure_file_stat(root, relative):
     """返回 root 内普通文件的 fstat 结果。"""
     parent_fd, name, parent_rel = _open_parent_fd(root, relative, create=False)
@@ -717,7 +744,7 @@ def is_settled(rec, out_dir):
         return False
     if q in ("text", "sparse"):
         rp = rec.get("raw")
-        return bool(rp) and secure_exists(out_dir, rp)
+        return bool(rp) and secure_exists(out_dir, rp) and secure_file_size(out_dir, rp) > 0
     return True   # image / skip_duplicate 等判定型状态,无需重算
 
 # ---------- front matter 安全值 ----------

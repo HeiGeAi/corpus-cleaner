@@ -255,3 +255,9 @@ Dependency license note: this tool depends on PyMuPDF (AGPL-3.0). Redistribution
 ## 更多开源工具
 
 本项目属于问问黑哥的开源武器库。全部开源项目的清单、用途和协议,见 [heigeai.com/opensource](https://www.heigeai.com/opensource/)。
+
+### Cleanup archive verification
+
+Extraction now records a SHA-256 fingerprint of the source. Cleanup requires a readable, unchanged source and a nonempty archive. Same-name MOBI files are eligible only when their explicit EPUB target also has a verified archive and unchanged source; missing, failed, or empty EPUBs are retained. Default cleanup remains a dry run.
+
+Legacy records without fingerprints are kept. Review and re-extract with `--force` only when appropriate before cleanup (this resets OCR/repair state); do not add fingerprints manually. Changed fingerprinted sources are re-extracted by normal incremental runs. Unreadable sources are retained because their content cannot be verified. The explicit `--delete-image` opt-in for unarchived image/failed sources remains unchanged.

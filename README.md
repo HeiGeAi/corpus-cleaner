@@ -255,3 +255,18 @@ Dependency license note: this tool depends on PyMuPDF (AGPL-3.0). Redistribution
 ## 更多开源工具
 
 本项目属于问问黑哥的开源武器库。全部开源项目的清单、用途和协议,见 [heigeai.com/opensource](https://www.heigeai.com/opensource/)。
+
+### Cleanup archive verification
+
+Extraction records SHA-256 fingerprints of both the source (`source_sha256`) and the exact UTF-8 `_raw` output (`raw_sha256`). Cleanup checks both fingerprints during selection and again immediately before each deletion. A nonempty archive alone is insufficient. Same-name MOBI files additionally require their explicit EPUB target to pass the same source/archive checks. Default cleanup remains a dry run.
+
+OCR and legacy conversion fingerprint the source before and after processing, then publish the generated archive and matching metadata. Text repair verifies the old archive fingerprint before transforming it; it never adopts unknown or corrupted bytes. Each successful OCR/conversion/text repair checkpoints the manifest. Archive bytes are atomically written before the manifest is atomically saved: an interrupted metadata save leaves a missing/mismatched fingerprint, so ordinary cleanup retains the source. This is fail-closed publication, not a multi-file transaction or concurrent-writer lock.
+
+**Recovery and old libraries:**
+
+- Unknown/missing fingerprints, unreadable files, and changed archives retain originals. `verify.py` reports unverified text archives. `build.py` only rebuilds Markdown and cannot establish archive integrity.
+- Back up the library, including `_raw` and `manifest.json`, before recovery. Normal incremental extraction restores a known mismatched archive from its available source; this resets that file's OCR/text-repair state. Re-run the appropriate repair stages and `build.py`, then `verify.py` and cleanup's dry run.
+- Legacy records without archive fingerprints are preserved by incremental extraction so old OCR/manual work is not silently overwritten. After reviewing/backing up that work, `extract.py --force` re-extracts every source currently under `--src` and resets its repair state. Re-run OCR/conversion/text repair as needed. Never hand-fill fingerprints or hash the current legacy archive to "approve" deletion.
+- If the source is missing, these scripts cannot establish provenance for legacy/changed archive content. Keep the surviving archive and recover the source or a trusted matching archive/manifest backup; do not manufacture verification metadata.
+
+Fingerprints detect byte changes, not OCR accuracy, semantic completeness, or malicious modification of both archive and manifest. Run pipeline stages serially and stop external edits during cleanup; there is no cross-process lock or guarantee against edits after the final integrity check. Keep independent backups. The explicit `--delete-image` opt-in for unarchived image/failed sources still bypasses archive requirements and can permanently discard their content.

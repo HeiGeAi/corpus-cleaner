@@ -2,6 +2,7 @@
 """Regression tests for the deterministic archive pipeline."""
 
 import json
+import hashlib
 import importlib
 import os
 import subprocess
@@ -134,8 +135,7 @@ class ArchivePipelineTests(unittest.TestCase):
                 "verify 不应把刚由 build 生成的文件误报成孤儿 MD",
             )
 
-            # cleanup 只需要元数据与父目录写权限，不应要求源文件可读。
-            source.chmod(0o200)
+            # cleanup must read the source to verify the archived version.
             cleanup_proc = subprocess.run(
                 [
                     sys.executable,
@@ -961,6 +961,8 @@ class ArchivePipelineTests(unittest.TestCase):
             records = [{
                 "name": "victim.docx",
                 "rel": "nested/victim.docx",
+                "source_sha256": hashlib.sha256(b"inside").hexdigest(),
+                "raw_sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
                 "ext": ".docx",
                 "quality": "text",
                 "raw": "_raw/all/record.txt",
@@ -975,7 +977,7 @@ class ArchivePipelineTests(unittest.TestCase):
                 if (os.path.realpath(base) == os.path.realpath(src)
                         and str(relative).replace("\\", "/") == "nested/victim.docx"):
                     source_opens += 1
-                    if source_opens == 2:
+                    if source_opens == 4:
                         nested.rename(parked)
                         nested.symlink_to(outside, target_is_directory=True)
                 return result
@@ -986,7 +988,7 @@ class ArchivePipelineTests(unittest.TestCase):
                     with self.assertRaises((OSError, RuntimeError, ValueError)):
                         cleanup.main()
 
-            self.assertEqual(source_opens, 2)
+            self.assertEqual(source_opens, 4)
             self.assertEqual((outside / "victim.docx").read_text(encoding="utf-8"), "outside")
             self.assertEqual((parked / "victim.docx").read_text(encoding="utf-8"), "inside")
 

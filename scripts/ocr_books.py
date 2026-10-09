@@ -8,7 +8,7 @@
 import os, sys, argparse, subprocess, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (clean, load_manifest, save_manifest, rec_key, raw_filename,
-                    safe_join, require_tool, secure_makedirs, secure_write_text)
+                    safe_join, require_tool, secure_makedirs, write_raw_archive, secure_sha256)
 
 def ocr_page(doc, i, dpi, lang):
     pix = doc[i].get_pixmap(dpi=dpi)
@@ -81,20 +81,23 @@ def main():
     done = full_failed = 0
     for idx, r in enumerate(books, 1):
         try:
+            fingerprint = secure_sha256(a.src, rec_key(r))
             doc = fitz.open(source_paths[id(r)])
             try:
                 n = doc.page_count
                 parts = [ocr_page(doc, i, a.dpi, a.lang) for i in range(n)]
             finally:
                 doc.close()
+            if secure_sha256(a.src, rec_key(r)) != fingerprint:
+                raise RuntimeError("OCR 期间源文件已改变，请重试")
         except Exception as e:
             full_failed += 1
             print(f"  [err] {r['name'][:40]}: {e}"); continue
         full = "\n\n".join(parts); chars = len(full.replace("\n", "").strip())
         raw_rel = os.path.join("_raw", "all", raw_filename(rec_key(r)))
-        secure_write_text(a.out, raw_rel, full, create_parent=True)
+        write_raw_archive(a.out, r, raw_rel, full)
         r.update({"chars": chars, "quality": "text", "ocr": True, "count": n,
-                  "raw": raw_rel.replace(os.sep, "/")})
+                  "source_sha256": fingerprint})
         save_manifest(a.out, manifest)   # 逐本落盘,断点续跑的关键
         done += 1
         print(f"  [{idx}/{len(books)}] {chars}字 {n}页  {r['name'][:44]}")

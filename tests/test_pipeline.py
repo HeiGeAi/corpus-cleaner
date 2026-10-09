@@ -962,6 +962,7 @@ class ArchivePipelineTests(unittest.TestCase):
                 "name": "victim.docx",
                 "rel": "nested/victim.docx",
                 "source_sha256": hashlib.sha256(b"inside").hexdigest(),
+                "raw_sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
                 "ext": ".docx",
                 "quality": "text",
                 "raw": "_raw/all/record.txt",

@@ -13,7 +13,7 @@ from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (clean, judge_quality, classify, load_manifest, save_manifest,
                     manifest_index, rec_key, is_settled, raw_filename, safe_join,
-                    find_soffice, secure_makedirs, secure_write_text, secure_sha256, RETRYABLE)
+                    find_soffice, secure_makedirs, write_raw_archive, secure_sha256, RETRYABLE)
 
 def extract_pdf(p):
     import fitz
@@ -169,6 +169,7 @@ def main():
         try:
             rec["size"] = os.path.getsize(p)
             rec.pop("source_sha256", None)
+            rec.pop("raw_sha256", None)
             fingerprint = secure_sha256(a.src, rel)
             if ext == ".ppt":
                 rec.update({"quality": "needs_conversion", "note": "老格式PPT,需LibreOffice转换"})
@@ -186,8 +187,8 @@ def main():
                 if secure_sha256(a.src, rel) != fingerprint:
                     raise RuntimeError("提取期间源文件已改变，请重试")
                 raw_rel = os.path.join("_raw", "all", raw_filename(rel))
-                secure_write_text(a.out, raw_rel, full, create_parent=True)
-                rec.update(meta); rec["raw"] = raw_rel.replace(os.sep, "/")
+                write_raw_archive(a.out, rec, raw_rel, full)
+                rec.update(meta)
                 rec["source_sha256"] = fingerprint
                 rec.pop("error", None); rec.pop("ocr", None); rec.pop("garble_fixed", None)
             else:

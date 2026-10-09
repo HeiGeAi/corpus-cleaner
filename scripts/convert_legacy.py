@@ -7,7 +7,7 @@ import os, sys, argparse, subprocess, tempfile, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (clean, judge_quality, load_manifest, save_manifest, rec_key,
                     raw_filename, safe_join, find_soffice, secure_makedirs,
-                    secure_write_text)
+                    write_raw_archive, secure_sha256)
 
 def extract_pptx(p):
     from pptx import Presentation
@@ -54,6 +54,7 @@ def main():
             s = source_paths[id(rec)]
             if not os.path.exists(s):
                 print(f"[SKIP] 原始文件不在: {rec['name'][:40]}"); continue
+            fingerprint = secure_sha256(a.src, rec_key(rec))
             subprocess.run([soff, "--headless", "--convert-to", "pptx", "--outdir", TMP, s],
                            capture_output=True, timeout=300)
             base = os.path.splitext(os.path.basename(rec["name"]))[0]
@@ -63,15 +64,18 @@ def main():
                 print(f"[FAIL] {rec['name'][:40]}"); continue
             try:
                 full, n, chars, q = extract_pptx(pptx)
+                if secure_sha256(a.src, rec_key(rec)) != fingerprint:
+                    raise RuntimeError("转换期间源文件已改变，请重试")
             except Exception as e:
                 rec["quality"] = "failed"; rec["error"] = str(e)
                 os.remove(pptx); continue
             os.remove(pptx)   # 随转随清,防同名 base 互相污染
             raw_rel = os.path.join("_raw", "all", raw_filename(rec_key(rec)))
-            secure_write_text(a.out, raw_rel, full, create_parent=True)
+            write_raw_archive(a.out, rec, raw_rel, full)
             rec.update({"unit": "slides", "count": n, "chars": chars, "quality": q,
-                        "raw": raw_rel.replace(os.sep, "/"), "converted": True})
+                        "source_sha256": fingerprint, "converted": True})
             rec.pop("error", None)
+            save_manifest(a.out, manifest)   # Checkpoint bytes plus both fingerprints.
             ok += 1
             print(f"[OK] {q:6} {n}页 {chars}字  {rec['name'][:40]}")
     finally:

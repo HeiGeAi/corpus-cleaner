@@ -2,7 +2,7 @@
 """阶段8: 安全删除原始素材。默认 dry-run(只列不删), 加 --apply 才真删。
 默认只删"已完整进库"的(text/sparse, 且 _raw 留档存在)+ skip_duplicate。
 图片型/损坏(内容没进库)默认保留; 加 --delete-image 才一并删(确认不要视觉内容时)。
-删前逐个验证源文件 SHA-256 与提取时一致、_raw 留档存在且非空。
+删前逐个验证源文件及 _raw 留档 SHA-256 与最后成功提取/修复时一致，留档非空。
 同名重复文件必须关联到已验证的 EPUB；无指纹/不可读/留档无效时保留。
 用法: python3 cleanup.py --src <素材包> --out <库> [--apply] [--delete-image]"""
 import os, sys, argparse
@@ -49,7 +49,10 @@ def main():
                         or secure_sha256(src_root, rec_key(source)) != source["source_sha256"]):
                     return False
             raw = target.get("raw")
-            return bool(raw) and secure_file_size(out_root, raw) > 10
+            fingerprint = target.get("raw_sha256")
+            return (bool(raw) and isinstance(fingerprint, str) and len(fingerprint) == 64
+                    and secure_file_size(out_root, raw) > 10
+                    and secure_sha256(out_root, raw) == fingerprint)
         except (OSError, ValueError, RuntimeError):
             return False
 
@@ -76,7 +79,7 @@ def main():
     keepsz = sum(source_stats[id(r)].st_size for r in keep if id(r) in source_stats)
     print(f"{'[预览]' if not a.apply else '[执行]'} 将删 {len(to_delete)} 个 ({gb(delsz)}), 保留 {len(keep)} 个 ({gb(keepsz)})")
     if no_archive:
-        print(f"⚠ 无留档保留不删: {len(no_archive)} 个 -> {no_archive}")
+        print(f"⚠ 源文件或留档未验证，保留不删: {len(no_archive)} 个 -> {no_archive}")
     if not a.apply:
         print("\n这是预览。确认无误后加 --apply 真删。图片型默认保留,加 --delete-image 才删。")
         return

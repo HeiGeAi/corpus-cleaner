@@ -716,6 +716,24 @@ def safe_md(rec):
         stem = f"{stem}.{digest}"
     return bounded_filename(stem, ".md", normalized_rel or raw_name)
 
+# ---------- Archive integrity lifecycle ----------
+def text_sha256(text):
+    """Fingerprint the exact UTF-8 bytes passed to the atomic text writer."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def write_raw_archive(out_dir, rec, raw_rel, text):
+    """Publish bytes before their fingerprint; callers then save the manifest.
+
+    Hash the intended output, never adopt whatever happens to be on disk later.
+    If manifest saving is interrupted, an old/missing fingerprint makes cleanup
+    fail closed. This is ordered, recoverable publication, not a multi-file lock.
+    """
+    fingerprint = text_sha256(text)
+    secure_write_text(out_dir, raw_rel, text, create_parent=True)
+    rec.update({"raw": raw_rel.replace(os.sep, "/"), "raw_sha256": fingerprint})
+
+
 # ---------- manifest 读写与增量合并 ----------
 def load_manifest(out_dir):
     if not secure_exists(out_dir, "manifest.json"):
@@ -744,7 +762,16 @@ def is_settled(rec, out_dir):
         return False
     if q in ("text", "sparse"):
         rp = rec.get("raw")
-        return bool(rp) and secure_exists(out_dir, rp) and secure_file_size(out_dir, rp) > 0
+        if not rp or not secure_exists(out_dir, rp) or secure_file_size(out_dir, rp) == 0:
+            return False
+        # Preserve legacy OCR/manual work without inventing evidence for it.
+        # A known fingerprint mismatch is recoverable by extracting the source.
+        if rec.get("raw_sha256"):
+            try:
+                return secure_sha256(out_dir, rp) == rec["raw_sha256"]
+            except (OSError, ValueError, RuntimeError):
+                return False
+        return True
     return True   # image / skip_duplicate 等判定型状态,无需重算
 
 # ---------- front matter 安全值 ----------

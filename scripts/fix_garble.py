@@ -7,7 +7,7 @@ import os, sys, argparse, unicodedata
 from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (load_manifest, save_manifest, garble_score, HAN_RE, safe_join,
-                    secure_exists, secure_read_text, secure_write_text)
+                    secure_exists, secure_read_text, write_raw_archive, text_sha256)
 
 def norm_radicals(text):
     out = []
@@ -53,6 +53,10 @@ def main():
         if not secure_exists(a.out, raw_rel):
             continue
         t = secure_read_text(a.out, raw_rel)
+        # A text-only repair cannot establish provenance for unknown bytes.
+        if not r.get("raw_sha256") or text_sha256(t) != r["raw_sha256"]:
+            print(f"  [SKIP] 留档未验证，请先从原件重新提取: {r['name'][:40]}")
+            continue
         if len(HAN_RE.findall(t)) < 50:
             continue
         rad0, dup0 = garble_score(t)
@@ -60,8 +64,9 @@ def main():
             continue
         t2 = dedup_repeats(norm_radicals(t))
         rad1, dup1 = garble_score(t2)
-        secure_write_text(a.out, raw_rel, t2)
+        write_raw_archive(a.out, r, raw_rel, t2)
         r["chars"] = len(t2.strip()); r["garble_fixed"] = True  # 与 extract 阶段同口径(全字符数)
+        save_manifest(a.out, manifest)   # Commit matching repair metadata per file.
         fixed += 1
         print(f"  部{rad0*100:4.1f}%叠{dup0*100:4.1f}% -> 部{rad1*100:4.1f}%叠{dup1*100:4.1f}%  {r['name'][:40]}")
     save_manifest(a.out, manifest)

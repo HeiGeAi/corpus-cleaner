@@ -6,7 +6,7 @@ import os, sys, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (load_manifest, garble_score, HAN_RE, safe_md, safe_join,
                     subcategory, SUBCATEGORY_FOR, secure_exists, secure_is_dir,
-                    secure_read_text)
+                    secure_read_text, text_sha256)
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--out", required=True)
@@ -26,7 +26,7 @@ def main():
         }
     except ValueError as e:
         sys.exit(f"拒绝不安全的 manifest 路径: {e}")
-    empty, garble, short_book, noraw = [], [], [], []
+    empty, garble, short_book, noraw, unverified = [], [], [], [], []
     ok = checked = 0
     for r in manifest:
         q = r.get("quality")
@@ -36,6 +36,8 @@ def main():
         if not rp or not secure_exists(a.out, rp):
             noraw.append(r["name"]); continue
         t = secure_read_text(a.out, rp); body = t.strip(); checked += 1
+        if not r.get("raw_sha256") or text_sha256(t) != r["raw_sha256"]:
+            unverified.append(r["name"]); continue
         if len(body) < 30:
             empty.append((r["name"], len(body))); continue
         if len(HAN_RE.findall(t)) >= 50:
@@ -45,9 +47,9 @@ def main():
         if r.get("ocr") and r.get("count", 0) >= 20 and r.get("chars", 0) < r["count"] * 50:
             short_book.append((r["name"], r.get("count"), r.get("chars")))
         ok += 1
-    print(f"校对 text/sparse: {checked} 个 | 正常 {ok} | 空 {len(empty)} | 乱码残留 {len(garble)} | OCR偏低 {len(short_book)} | 无raw {len(noraw)}")
+    print(f"校对 text/sparse: {checked} 个 | 正常 {ok} | 空 {len(empty)} | 乱码残留 {len(garble)} | OCR偏低 {len(short_book)} | 无raw {len(noraw)} | 留档未验证 {len(unverified)}")
     for title, rows in [("空/过短", empty), ("乱码残留(部首%/叠字%)", garble),
-                        ("OCR字数偏低", short_book), ("无raw", noraw)]:
+                        ("OCR字数偏低", short_book), ("无raw", noraw), ("留档未验证(缺指纹或内容改变)", unverified)]:
         if rows:
             print(f"\n=== {title} ===")
             for x in rows: print("  ", x)
@@ -88,7 +90,9 @@ def main():
     images = [r for r in manifest if r.get("quality") == "image"]
     failed = [r["name"] for r in manifest if r.get("quality") == "failed"]
     print(f"\n删原始会丢内容: 图片型 {len(images)} 个 + 损坏 {len(failed)} 个(内容未进库)")
-    if empty or garble or short_book or noraw:
+    if unverified:
+        print("\n⚠ 留档完整性无法确认；保留原件，备份修复成果后从原件重新提取，勿手填指纹")
+    if empty or garble or short_book or noraw or unverified:
         print("\n⚠ 有异常,建议修复(乱码->fix_garble; 空/OCR偏低->ocr_books或单独OCR)后再删原始")
     else:
         print("\n✓ 文字类无异常")

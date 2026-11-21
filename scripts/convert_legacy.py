@@ -32,12 +32,13 @@ def main():
         sys.exit(f"拒绝不安全的输出路径: {e}")
     secure_makedirs(a.out, os.path.join("_raw", "all"))
     soff = a.soffice or find_soffice()
-    assert soff and os.path.exists(soff), (
-        "LibreOffice 未找到。\n"
-        "  macOS: brew install --cask libreoffice\n"
-        "  Linux: apt install libreoffice (或 dnf/pacman)\n"
-        "  Windows: 从 libreoffice.org 下载安装"
-    )
+    if not (soff and os.path.exists(soff)):
+        sys.exit(
+            "LibreOffice 未找到。\n"
+            "  macOS: brew install --cask libreoffice\n"
+            "  Linux: apt install libreoffice (或 dnf/pacman)\n"
+            "  Windows: 从 libreoffice.org 下载安装"
+        )
     manifest = load_manifest(a.out)
     targets = [r for r in manifest if r.get("quality") == "needs_conversion"]
     if not targets:
@@ -54,9 +55,14 @@ def main():
             s = source_paths[id(rec)]
             if not os.path.exists(s):
                 print(f"[SKIP] 原始文件不在: {rec['name'][:40]}"); continue
-            fingerprint = secure_sha256(a.src, rec_key(rec))
-            subprocess.run([soff, "--headless", "--convert-to", "pptx", "--outdir", TMP, s],
-                           capture_output=True, timeout=300)
+            try:
+                fingerprint = secure_sha256(a.src, rec_key(rec))
+                subprocess.run([soff, "--headless", "--convert-to", "pptx", "--outdir", TMP, s],
+                               capture_output=True, timeout=300)
+            except (subprocess.TimeoutExpired, OSError, RuntimeError, ValueError) as e:
+                rec["quality"] = "failed"; rec["error"] = f"{type(e).__name__}: {e}"
+                save_manifest(a.out, manifest)
+                print(f"[FAIL] {rec['name'][:40]}: {e}"); continue
             base = os.path.splitext(os.path.basename(rec["name"]))[0]
             pptx = os.path.join(TMP, base + ".pptx")
             if not os.path.exists(pptx):

@@ -65,6 +65,8 @@ def main():
             doc = fitz.open(p)
             try:
                 n = doc.page_count
+                if n <= 0:
+                    continue
                 sample = sorted(set([min(2, n-1), n//5, n//2, n*4//5]))
                 avg = sum(len(ocr_page(doc, i, a.dpi, a.lang)) for i in sample) / len(sample)
             finally:

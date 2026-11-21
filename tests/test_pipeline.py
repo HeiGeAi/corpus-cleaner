@@ -1264,6 +1264,105 @@ class ArchivePipelineTests(unittest.TestCase):
             self.assertEqual(len(archived), 1)
             self.assertLessEqual(len(archived[0].name.encode("utf-8")), 255)
 
+    def test_query_cat_matches_exact_directory_boundary_and_rejects_empty_keyword(self):
+        query_script = ROOT / "scripts" / "query.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = Path(tmp) / "lib"
+            (lib / "文案" / "子目录").mkdir(parents=True)
+            (lib / "文案珍藏").mkdir(parents=True)
+            (lib / "文案" / "a.md").write_text("---\ntitle: alpha\n---\n关键字命中内容\n", encoding="utf-8")
+            (lib / "文案" / "子目录" / "sub.md").write_text("---\ntitle: sub\n---\n关键字命中子目录\n", encoding="utf-8")
+            (lib / "文案珍藏" / "b.md").write_text("---\ntitle: beta\n---\n关键字不应混入\n", encoding="utf-8")
+
+            proc = subprocess.run(
+                [sys.executable, str(query_script), "--lib", str(lib), "--cat", "文案/", "关键字"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("文案/a.md", proc.stdout)
+            self.assertIn("文案/子目录/sub.md", proc.stdout)
+            self.assertNotIn("文案珍藏/b.md", proc.stdout)
+
+            empty = subprocess.run(
+                [sys.executable, str(query_script), "--lib", str(lib), "   "],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(empty.returncode, 2, empty.stdout + empty.stderr)
+
+    def test_extract_epub_closes_zip_and_enforces_total_size_cap(self):
+        scripts_dir = str(ROOT / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        extract_mod = importlib.import_module("extract")
+        with tempfile.TemporaryDirectory() as tmp:
+            ok_epub = Path(tmp) / "ok.epub"
+            with zipfile.ZipFile(ok_epub, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("ch1.xhtml", "<p>hello world</p>")
+            multi_epub = Path(tmp) / "multi.epub"
+            with zipfile.ZipFile(multi_epub, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for i in range(4):
+                    zf.writestr(f"ch{i}.xhtml", "<p>" + ("a" * 400) + "</p>")
+
+            before_fds = len(os.listdir("/dev/fd"))
+            full, meta = extract_mod.extract_epub(str(ok_epub))
+            self.assertIn("hello world", full)
+            self.assertEqual(meta["count"], 1)
+            self.assertEqual(before_fds, len(os.listdir("/dev/fd")))
+
+            orig_chapter = extract_mod.EPUB_CHAPTER_CAP
+            orig_total = extract_mod.EPUB_TOTAL_CAP
+            try:
+                extract_mod.EPUB_CHAPTER_CAP = 1024
+                extract_mod.EPUB_TOTAL_CAP = 1000
+                with self.assertRaisesRegex(ValueError, "zip bomb"):
+                    extract_mod.extract_epub(str(multi_epub))
+            finally:
+                extract_mod.EPUB_CHAPTER_CAP = orig_chapter
+                extract_mod.EPUB_TOTAL_CAP = orig_total
+            self.assertEqual(before_fds, len(os.listdir("/dev/fd")))
+
+    def test_convert_legacy_timeout_marks_failed_and_continues_batch(self):
+        scripts_dir = str(ROOT / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        common_mod = importlib.import_module("common")
+        conv_mod = importlib.import_module("convert_legacy")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src"
+            out = Path(tmp) / "out"
+            src.mkdir()
+            (src / "a.ppt").write_bytes(b"ppt-a")
+            (src / "b.ppt").write_bytes(b"ppt-b")
+            common_mod.save_manifest(
+                str(out),
+                [
+                    {"name": "a.ppt", "rel": "a.ppt", "ext": ".ppt", "quality": "needs_conversion"},
+                    {"name": "b.ppt", "rel": "b.ppt", "ext": ".ppt", "quality": "needs_conversion"},
+                ],
+            )
+            fake_soff = Path(tmp) / "soffice"
+            fake_soff.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            calls = []
+            def fake_run(cmd, **kwargs):
+                calls.append(Path(cmd[-1]).name)
+                if Path(cmd[-1]).name == "a.ppt":
+                    raise subprocess.TimeoutExpired(cmd=cmd, timeout=300)
+                return subprocess.CompletedProcess(cmd, 0)
+
+            with mock.patch.object(conv_mod.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(sys, "argv", ["convert_legacy.py", "--src", str(src), "--out", str(out), "--soffice", str(fake_soff)]):
+                conv_mod.main()
+
+            self.assertEqual(calls, ["a.ppt", "b.ppt"])
+            manifest = common_mod.load_manifest(str(out))
+            by_name = {r["name"]: r for r in manifest}
+            self.assertEqual(by_name["a.ppt"]["quality"], "failed")
+            self.assertIn("TimeoutExpired", by_name["a.ppt"]["error"])
+            self.assertEqual(by_name["b.ppt"]["quality"], "failed")
+
 
 class DependencyFloorTests(unittest.TestCase):
     def test_known_vulnerable_dependency_versions_are_excluded(self):

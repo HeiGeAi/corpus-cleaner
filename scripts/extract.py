@@ -17,9 +17,12 @@ from common import (clean, judge_quality, classify, load_manifest, save_manifest
 
 def extract_pdf(p):
     import fitz
-    doc = fitz.open(p); n = doc.page_count
-    parts = [pg.get_text("text") for pg in doc]
-    doc.close()
+    doc = fitz.open(p)
+    try:
+        n = doc.page_count
+        parts = [pg.get_text("text") for pg in doc]
+    finally:
+        doc.close()
     full = clean("\n".join(parts)); chars = len(full.strip())
     return full, {"unit": "pages", "count": n, "chars": chars, "quality": judge_quality(chars, n, "pdf")}
 
@@ -73,19 +76,31 @@ def extract_doc(p):
                   "quality": "text" if chars >= 200 else "sparse"}
 
 EPUB_CHAPTER_CAP = 50 * 1024 * 1024   # 单章节解压后上限 50MB,防 zip bomb 耗尽内存
+EPUB_TOTAL_CAP = 100 * 1024 * 1024    # 单本 epub 累计解压上限 100MB,防多章节 zip bomb
 
 def extract_epub(p):
-    z = zipfile.ZipFile(p)
-    htmls = sorted(n for n in z.namelist() if n.lower().endswith((".html", ".xhtml", ".htm")))
-    parts = []
-    for h in htmls:
-        if z.getinfo(h).file_size > EPUB_CHAPTER_CAP:
-            raise ValueError(f"epub 章节解压后超 50MB,疑似 zip bomb: {h}")
-        raw = z.read(h).decode("utf-8", "ignore")
-        raw = re.sub(r"(?is)<(script|style).*?</\1>", "", raw)
-        raw = re.sub(r"(?s)<[^>]+>", " ", raw)
-        raw = html.unescape(raw)  # 只在移除实际标签后解码，保留文本中的尖括号
-        parts.append(raw)
+    with zipfile.ZipFile(p) as z:
+        htmls = sorted(n for n in z.namelist() if n.lower().endswith((".html", ".xhtml", ".htm")))
+        parts = []
+        total_bytes = 0
+        for h in htmls:
+            info = z.getinfo(h)
+            if info.file_size > EPUB_CHAPTER_CAP:
+                raise ValueError(f"epub 章节解压后超 50MB,疑似 zip bomb: {h}")
+            if total_bytes + info.file_size > EPUB_TOTAL_CAP:
+                raise ValueError(f"epub 累计解压后超上限,疑似多章节 zip bomb: {h}")
+            with z.open(h) as fh:
+                chunk = fh.read(EPUB_CHAPTER_CAP + 1)
+            if len(chunk) > EPUB_CHAPTER_CAP:
+                raise ValueError(f"epub 章节解压后超 50MB,疑似 zip bomb: {h}")
+            total_bytes += len(chunk)
+            if total_bytes > EPUB_TOTAL_CAP:
+                raise ValueError(f"epub 累计解压后超上限,疑似多章节 zip bomb: {h}")
+            raw = chunk.decode("utf-8", "ignore")
+            raw = re.sub(r"(?is)<(script|style).*?</\1>", "", raw)
+            raw = re.sub(r"(?s)<[^>]+>", " ", raw)
+            raw = html.unescape(raw)  # 只在移除实际标签后解码，保留文本中的尖括号
+            parts.append(raw)
     full = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]{2,}", " ", clean("\n".join(parts))))
     return full, {"unit": "chapters", "count": len(htmls), "chars": len(full.strip()), "quality": "text"}
 

@@ -15,13 +15,13 @@ def parse_md(path):
     fm = {}
     body = text
     if text.startswith("---"):
-        parts = text.split("\n---", 2)
-        if len(parts) >= 2:
+        parts = text.split("\n---", 1)
+        if len(parts) == 2:
             for line in parts[0].splitlines()[1:]:
                 if ":" in line:
                     k, v = line.split(":", 1)
                     fm[k.strip()] = v.strip().strip('"')
-            body = parts[1] if len(parts) == 2 else parts[1] + parts[2]
+            body = parts[1]
     return fm, body
 
 def context_line(body, kw, width=50):
@@ -39,13 +39,17 @@ def main():
     ap.add_argument("--cat", default=None, help="限定类目目录名")
     ap.add_argument("--top", type=int, default=10)
     a = ap.parse_args()
-    kws = [k.lower() for k in a.keywords]
+    kws = [k.strip().lower() for k in a.keywords if k.strip()]
+    if not kws:
+        ap.error("至少需要一个非空关键词")
+    cat_norm = a.cat.replace("\\", "/").strip("/") if a.cat else None
 
     hits = []
     for root, dirs, files in os.walk(a.lib):
         dirs[:] = [d for d in dirs if not d.startswith((".", "_"))]
         rel_root = os.path.relpath(root, a.lib)
-        if a.cat and rel_root != "." and not rel_root.startswith(a.cat):
+        rel_norm = rel_root.replace(os.sep, "/")
+        if cat_norm and rel_norm != "." and rel_norm != cat_norm and not rel_norm.startswith(cat_norm + "/"):
             continue
         for f in files:
             if not f.endswith(".md") or (rel_root == "." and f in SKIP_TOP):
